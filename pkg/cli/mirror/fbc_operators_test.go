@@ -9,34 +9,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	imagecopy "github.com/containers/image/v5/copy"
 	"github.com/containers/image/v5/pkg/sysregistriesv2"
 	"github.com/containers/image/v5/signature"
 	"github.com/containers/image/v5/types"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/opencontainers/go-digest"
-	"github.com/otiai10/copy"
-
 	"github.com/openshift/library-go/pkg/image/reference"
+	"github.com/openshift/oc/pkg/cli/image/imagesource"
+	"github.com/operator-framework/operator-registry/alpha/declcfg"
+	"github.com/otiai10/copy"
+	"github.com/stretchr/testify/require"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
 	"github.com/openshift/oc-mirror/pkg/cli"
 	"github.com/openshift/oc-mirror/pkg/image"
 	"github.com/openshift/oc-mirror/pkg/metadata/storage"
-	"github.com/openshift/oc/pkg/cli/image/imagesource"
-	"github.com/operator-framework/operator-registry/alpha/declcfg"
-	"github.com/operator-framework/operator-registry/alpha/property"
-	"github.com/stretchr/testify/require"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
 const (
-	testdata         = "testdata/artifacts/rhop-ctlg-oci"
-	testdataMashed   = "testdata/artifacts/rhop-ctlg-oci-mashed"
-	rottenManifest   = "testdata/artifacts/rhop-rotten-manifest"
-	rottenLayer      = "testdata/artifacts/rhop-rotten-layer"
-	rottenConfig     = "testdata/artifacts/rhop-rotten-cfg"
-	otherLayer       = "testdata/artifacts/rhop-not-catalog"
+	testdata         = "testdata/artifacts/rhop-ctlg-oci"        // this is supposed to be the "good" scenario (but its technically broken since it was hacked ... mismatched fs layers (1) and diff ids (6))
+	testdataMashed   = "testdata/artifacts/rhop-ctlg-oci-mashed" // (TODO: not sure what mashed means) this is supposed to be the "good" scenario
+	rottenManifest   = "testdata/artifacts/rhop-rotten-manifest" // the manifest in the blob is broken
+	rottenLayer      = "testdata/artifacts/rhop-rotten-layer"    // this has a layer which is just text data
+	rottenConfig     = "testdata/artifacts/rhop-rotten-cfg"      // this has a broken config file
+	otherLayer       = "testdata/artifacts/rhop-not-catalog"     // this has a broken config file (TODO: only diff with rhop-rotten-cfg is blob layer... why?)
+	multiTestData    = "testdata/manifestlist/testonly/layout"   // multi architecture test case
+	singleTestData   = "testdata/single/testonly/layout"         // single architecture test case
 	registriesConfig = "testdata/configs/registries.conf"
 )
 
@@ -54,226 +58,108 @@ func TestParse(t *testing.T) {
 	fmt.Printf("%s - %s\n", s, rf)
 }
 
-// TODO: add preparation step that saves a catalog locally before testing
-// see maybe contents of pkg/image/testdata
-func TestGetOCIImgSrcFromPath(t *testing.T) {
-	type spec struct {
-		desc  string
-		inRef string
-		err   string
-	}
-	wdir, err := os.Getwd()
-	if err != nil {
-		t.Fatal("unable to get working dir")
-	}
-	cases := []spec{
-		{
-			desc:  "full path passes",
-			inRef: filepath.Join(wdir, testdata),
-			err:   "",
-		},
-		{
-			desc:  "relative path passes",
-			inRef: testdata,
-			err:   "",
-		},
-		{
-			desc:  "inexisting path should fail",
-			inRef: "/inexisting",
-			err:   "unable to get OCI Image from oci:/inexisting: open /inexisting/index.json: no such file or directory",
-		},
-		{
-			desc:  "path not containing oci structure should fail",
-			inRef: "/tmp",
-			err:   "unable to get OCI Image from oci:/tmp: open /tmp/index.json: no such file or directory",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.desc, func(t *testing.T) {
-			imgSrc, err := getOCIImgSrcFromPath(context.TODO(), c.inRef)
-			if c.err != "" {
-				require.EqualError(t, err, c.err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, "oci", imgSrc.Reference().Transport().Name())
-				imgSrc.Close()
-			}
+func TestExtractDeclarativeConfigFromImage(t *testing.T) {
 
+	type testCase struct {
+		name          string
+		layoutPath    layout.Path
+		expectedFiles []string
+		assertion     require.ErrorAssertionFunc
+	}
+
+	tests := []testCase{
+		{
+			name:       "single arch",
+			layoutPath: layout.Path(testdata),
+			expectedFiles: []string{
+				"aws-load-balancer-operator/catalog.json",
+				"node-observability-operator/catalog.json",
+			},
+			assertion: require.NoError,
+		},
+		{
+			name:       "multi arch",
+			layoutPath: layout.Path(multiTestData),
+			expectedFiles: []string{
+				"aws-load-balancer-operator/catalog.json",
+				"node-observability-operator/catalog.json",
+			},
+			assertion: require.NoError,
+		},
+		// The following two tests deal with really broken images and probably should never happen
+		{
+			name:       "layer is not a tar.gz",
+			layoutPath: layout.Path(rottenLayer),
+			// we won't get any files back in this test case
+			expectedFiles: []string{},
+			// NOTE: This result is slightly unexpected and requires explanation.
+			// go-containerregistry checks a layer to see if its actually compressed and if its not
+			// it will attempt to handle this gracefully and treat the layer as already uncompressed.
+			// It then proceeds to untar the content, but since this layer is not a tar, the tar.Next()
+			// function gets an unexpected EOF, and causes the PipeWriter to close. This means that when
+			// we attempt to read the "tar" in our code, we get an EOF, and therefore no error.
+			// However, the code will check to make sure the folder exists and has content in it
+			// and returns an error if this does not happen.
+			// We won't get any files either since the extraction can't complete.
+			assertion: require.Error,
+		},
+		{
+			name:          "image has broken config file",
+			layoutPath:    layout.Path(otherLayer),
+			expectedFiles: []string{},
+			assertion:     require.Error,
+		},
+	}
+
+	// handle images... all images are expected to have the same content in these tests
+	handleImage := func(t *testing.T, img v1.Image, expectedFiles []string, assertion require.ErrorAssertionFunc) {
+		t.Helper()
+		tmpDir := t.TempDir()
+		actualDir, err := extractDeclarativeConfigFromImage(img, tmpDir)
+		assertion(t, err)
+		for _, expectedFile := range expectedFiles {
+			require.FileExists(t, filepath.Join(actualDir, expectedFile))
+		}
+	}
+	// recursive function to handle image indexes
+	var handleIndex func(t *testing.T, idx v1.ImageIndex, expectedFiles []string, assertion require.ErrorAssertionFunc)
+	handleIndex = func(t *testing.T, idx v1.ImageIndex, expectedFiles []string, assertion require.ErrorAssertionFunc) {
+		t.Helper()
+		idxManifest, err := idx.IndexManifest()
+		require.NoError(t, err)
+		for _, descriptor := range idxManifest.Manifests {
+			if descriptor.MediaType.IsImage() {
+				img, err := idx.Image(descriptor.Digest)
+				require.NoError(t, err)
+				handleImage(t, img, expectedFiles, assertion)
+			} else if descriptor.MediaType.IsIndex() {
+				innerIdx, err := idx.ImageIndex(descriptor.Digest)
+				require.NoError(t, err)
+				handleIndex(t, innerIdx, expectedFiles, assertion)
+			}
+		}
+
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			imageIndex, err := test.layoutPath.ImageIndex()
+			require.NoError(t, err)
+			handleIndex(t, imageIndex, test.expectedFiles, test.assertion)
 		})
 	}
 }
-
-func TestGetManifest(t *testing.T) {
-	type spec struct {
-		desc       string
-		inRef      string
-		layerCount int
-		err        string
-	}
-	wdir, err := os.Getwd()
-	if err != nil {
-		t.Fatal("unable to get working dir")
-	}
-	cases := []spec{
-		{
-			desc:       "nominal case",
-			inRef:      filepath.Join(wdir, testdata),
-			layerCount: 1,
-			err:        "",
-		},
-		{
-			desc:       "index is unmarshallable fails",
-			inRef:      filepath.Join(wdir, rottenManifest),
-			layerCount: 0,
-			err:        "unable to unmarshall manifest of image : unexpected end of JSON input",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.desc, func(t *testing.T) {
-			imgSrc, err := getOCIImgSrcFromPath(context.TODO(), c.inRef)
-			if err != nil {
-				t.Fatalf("The given path is not an OCI image : %v", err)
-			}
-			defer imgSrc.Close()
-			manifest, err := getManifest(context.TODO(), imgSrc)
-			if c.err != "" {
-				require.EqualError(t, err, c.err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, c.layerCount, len(manifest.LayerInfos()))
-			}
-
-		})
-	}
-}
-
-func TestGetConfigPathFromLabel(t *testing.T) {
-	type spec struct {
-		desc            string
-		imagePath       string
-		configSha       string
-		expectedDirName string
-		err             string
-	}
-	cases := []spec{
-		{
-			desc:            "nominal case",
-			imagePath:       testdata,
-			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
-			expectedDirName: "/configs",
-			err:             "",
-		},
-		{
-			desc:            "sha doesnt exist fails",
-			imagePath:       testdata,
-			configSha:       "sha256:inexistingSha",
-			expectedDirName: "",
-			err:             "unable to read the config blob inexistingSha from the oci image: open testdata/artifacts/rhop-ctlg-oci/blobs/sha256/inexistingSha: no such file or directory",
-		},
-		{
-			desc:            "cfg layer json incorrect fails",
-			imagePath:       rottenConfig,
-			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
-			expectedDirName: "",
-			err:             "problem unmarshaling config blob in c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262: unexpected end of JSON input",
-		},
-		{
-			desc:            "label doesnt exist fails",
-			imagePath:       rottenConfig,
-			configSha:       "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae5782ff",
-			expectedDirName: "",
-			err:             "label " + configsLabel + " not found in config blob c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae5782ff",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.desc, func(t *testing.T) {
-			cfgDir, err := getConfigPathFromConfigLayer(c.imagePath, c.configSha)
-			if c.err != "" {
-				require.EqualError(t, err, c.err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, c.expectedDirName, cfgDir)
-			}
-
-		})
-	}
-}
-
-func TestFindFBCConfig(t *testing.T) {
-	type spec struct {
-		desc    string
-		options *MirrorOptions
-		err     string
-	}
-	cases := []spec{
-		{
-			desc: "nominal case",
-			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
-				ToMirror:  "test.registry.io",
-				OutputDir: testdata,
-			},
-			err: "",
-		},
-		{
-			desc: "not a FBC image fails",
-			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
-				ToMirror:  "test.registry.io",
-				OutputDir: "/tmp",
-			},
-			err: "unable to get OCI Image from oci:/tmp: open /tmp/index.json: no such file or directory",
-		},
-		{
-			desc: "corrupted manifest fails",
-			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
-				ToMirror:  "test.registry.io",
-				OutputDir: rottenManifest,
-			},
-			err: "unable to unmarshall manifest of image : unexpected end of JSON input",
-		},
-		{
-			desc: "corrupted layer fails",
-			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
-				ToMirror:  "test.registry.io",
-				OutputDir: rottenLayer,
-			},
-			err: "UntarLayers: NewReader failed - gzip: invalid header",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.desc, func(t *testing.T) {
-			_, err := c.options.findFBCConfig(context.TODO(), c.options.OutputDir, filepath.Join(c.options.OutputDir, artifactsFolderName))
-			if c.err != "" {
-				require.EqualError(t, err, c.err)
-			} else {
-				require.NoError(t, err)
-			}
-
-		})
-	}
-}
-
 func TestGetRelatedImages(t *testing.T) {
 	type spec struct {
 		desc                  string
-		configsPath           string
+		configsPath           layout.Path
 		expectedRelatedImages []declcfg.RelatedImage
-		packages              []v1alpha2.IncludePackage
 		err                   string
 	}
-	tmpdir := t.TempDir()
 	cases := []spec{
 		{
 			desc:        "nominal case",
-			configsPath: filepath.Join(testdata, blobsPath, "cac5b2f40be10e552461651655ca8f3f6ba3f65f41ecf4345efbcf1875415db6"),
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "node-observability-operator",
-				},
-			},
+			configsPath: testdata,
 			expectedRelatedImages: []declcfg.RelatedImage{
 				{
 					Image: "registry.redhat.io/noo/node-observability-operator-bundle-rhel8@sha256:25b8e1c8ed635364d4dcba7814ad504570b1c6053d287ab7e26c8d6a97ae3f6a",
@@ -291,37 +177,60 @@ func TestGetRelatedImages(t *testing.T) {
 					Name:  "agent",
 					Image: "registry.redhat.io/noo/node-observability-agent-rhel8@sha256:59bd5b8cefae5d5769d33dafcaff083b583a552e1df61194a3cc078b75cb1fdc",
 				},
+				{
+					Name:  "controller",
+					Image: "registry.redhat.io/albo/aws-load-balancer-controller-rhel8@sha256:d7bc364512178c36671d8a4b5a76cf7cb10f8e56997106187b0fe1f032670ece",
+				},
+				{
+					Name:  "registry.redhat.io/albo/aws-load-balancer-operator-bundle",
+					Image: "registry.redhat.io/albo/aws-load-balancer-operator-bundle@sha256:50b9402635dd4b312a86bed05dcdbda8c00120d3789ec2e9b527045100b3bdb4",
+				},
+				{
+					Name:  "manager",
+					Image: "registry.redhat.io/albo/aws-load-balancer-rhel8-operator@sha256:95c45fae0ca9e9bee0fa2c13652634e726d8133e4e3009b363fcae6814b3461d",
+				},
+				{
+					Name:  "kube-rbac-proxy",
+					Image: "registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:3658954f199040b0f244945c94955f794ee68008657421002e1b32962e7c30fc",
+				},
 			},
 			err: "",
 		},
 		{
-			desc:        "nominal case with mashed index.yaml passes",
-			configsPath: filepath.Join(testdataMashed, blobsPath, "cac5b2f40be10e552461651655ca8f3f6ba3f65f41ecf4345efbcf1875415db6"),
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MinVersion: "0.3.0",
-						MaxVersion: "0.3.1",
-					},
-				},
-			},
+			desc:        "multi arch nominal case passes",
+			configsPath: multiTestData,
 			expectedRelatedImages: []declcfg.RelatedImage{
 				{
-					Image: "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.0",
-					Name:  "foo",
+					Image: "registry.redhat.io/noo/node-observability-operator-bundle-rhel8@sha256:25b8e1c8ed635364d4dcba7814ad504570b1c6053d287ab7e26c8d6a97ae3f6a",
+					Name:  "node-observability-operator",
 				},
 				{
-					Image: "quay.io/redhatgov/oc-mirror-dev@sha256:7e1e74b87a503e95db5203334917856f61aece90a72e8d53a9fd903344eb78a5",
-					Name:  "operator",
+					Image: "registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:bb54bc66185afa09853744545d52ea22f88b67756233a47b9f808fe59cda925e",
+					Name:  "kube-rbac-proxy",
 				},
 				{
-					Name:  "foo",
-					Image: "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
+					Name:  "manager",
+					Image: "registry.redhat.io/noo/node-observability-rhel8-operator@sha256:0040925e971e4bb3ac34278c3fb5c1325367fe41ad73641e6502ec2104bc4e19",
 				},
 				{
-					Name:  "operator",
-					Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
+					Name:  "agent",
+					Image: "registry.redhat.io/noo/node-observability-agent-rhel8@sha256:59bd5b8cefae5d5769d33dafcaff083b583a552e1df61194a3cc078b75cb1fdc",
+				},
+				{
+					Name:  "controller",
+					Image: "registry.redhat.io/albo/aws-load-balancer-controller-rhel8@sha256:d7bc364512178c36671d8a4b5a76cf7cb10f8e56997106187b0fe1f032670ece",
+				},
+				{
+					Name:  "registry.redhat.io/albo/aws-load-balancer-operator-bundle",
+					Image: "registry.redhat.io/albo/aws-load-balancer-operator-bundle@sha256:50b9402635dd4b312a86bed05dcdbda8c00120d3789ec2e9b527045100b3bdb4",
+				},
+				{
+					Name:  "manager",
+					Image: "registry.redhat.io/albo/aws-load-balancer-rhel8-operator@sha256:95c45fae0ca9e9bee0fa2c13652634e726d8133e4e3009b363fcae6814b3461d",
+				},
+				{
+					Name:  "kube-rbac-proxy",
+					Image: "registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:3658954f199040b0f244945c94955f794ee68008657421002e1b32962e7c30fc",
 				},
 			},
 			err: "",
@@ -329,16 +238,45 @@ func TestGetRelatedImages(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
-			//Untar the configs blob to tmpdir
-			stream, err := os.Open(c.configsPath)
-			if err != nil {
-				t.Fatalf("unable to open %s: %v", c.configsPath, err)
+			var actualDir string
+			// handle images... all images are expected to have the same content in these tests
+			// for multi arch, the actualDir gets set twice, but its the same content so it does not matter
+			handleImage := func(t *testing.T, img v1.Image) {
+				t.Helper()
+				tmpDir := t.TempDir()
+				dir, err := extractDeclarativeConfigFromImage(img, tmpDir)
+				require.NoError(t, err)
+				actualDir = dir
 			}
-			err = UntarLayers(stream, tmpdir, "configs/")
-			if err != nil {
-				t.Fatalf("unable to untar %s: %v", c.configsPath, err)
+			// recursive function to handle image indexes
+			var handleIndex func(t *testing.T, idx v1.ImageIndex)
+			handleIndex = func(t *testing.T, idx v1.ImageIndex) {
+				t.Helper()
+				idxManifest, err := idx.IndexManifest()
+				require.NoError(t, err)
+				for _, descriptor := range idxManifest.Manifests {
+					if descriptor.MediaType.IsImage() {
+						img, err := idx.Image(descriptor.Digest)
+						require.NoError(t, err)
+						handleImage(t, img)
+					} else if descriptor.MediaType.IsIndex() {
+						innerIdx, err := idx.ImageIndex(descriptor.Digest)
+						require.NoError(t, err)
+						handleIndex(t, innerIdx)
+					}
+				}
 			}
-			relatedImages, err := getRelatedImages(filepath.Join(tmpdir, "configs"), c.packages)
+
+			imageIndex, err := c.configsPath.ImageIndex()
+			require.NoError(t, err)
+			handleIndex(t, imageIndex)
+			cfg, err := declcfg.LoadFS(context.Background(), os.DirFS(actualDir))
+			if err != nil {
+				t.Fatalf("unable to load the declarative config %s", err.Error())
+			}
+
+			relatedImages, err := getRelatedImages(*cfg)
+
 			if c.err != "" {
 				require.EqualError(t, err, c.err)
 			} else {
@@ -377,258 +315,6 @@ func TestGetRelatedImages(t *testing.T) {
 					}
 				}
 			}
-		})
-	}
-}
-
-func TestIsPackageSelected(t *testing.T) {
-	type spec struct {
-		desc           string
-		bundle         declcfg.Bundle
-		channels       []declcfg.Channel
-		packages       []v1alpha2.IncludePackage
-		expectedResult bool
-		err            string
-	}
-
-	cases := []spec{
-		{
-			desc: "package has minVersion only, and bundle is above returns true",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MinVersion: "0.3.0",
-					},
-				},
-			},
-			expectedResult: true,
-			err:            "",
-		},
-		{
-			desc: "package has minVersion only, and bundle is below returns false",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MinVersion: "0.4.0",
-					},
-				},
-			},
-			expectedResult: false,
-			err:            "",
-		},
-		{
-			desc: "package has maxVersion only, and bundle is above returns false",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MaxVersion: "0.3.0",
-					},
-				},
-			},
-			expectedResult: false,
-			err:            "",
-		},
-		{
-			desc: "package has maxVersion only, and bundle is below returns true",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MaxVersion: "0.4.0",
-					},
-				},
-			},
-			expectedResult: true,
-			err:            "",
-		},
-		{
-			desc: "bundle version is within range returns true",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MinVersion: "0.3.0",
-						MaxVersion: "0.3.1",
-					},
-				},
-			},
-			expectedResult: true,
-			err:            "",
-		},
-		{
-			desc: "bundle version is not within range returns false",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MinVersion: "1.3.0",
-						MaxVersion: "1.3.1",
-					},
-				},
-			},
-			expectedResult: false,
-			err:            "",
-		},
-		{
-			desc: "No version range in IncludePackage returns true",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "foo",
-				},
-			},
-			expectedResult: true,
-			err:            "",
-		},
-		{
-			desc: "bundle simply not in IncludePackage returns false",
-			bundle: declcfg.Bundle{
-				Name:    "foo.v0.3.1",
-				Package: "foo",
-				Image:   "quay.io/redhatgov/oc-mirror-dev:foo-bundle-v0.3.1",
-				RelatedImages: []declcfg.RelatedImage{
-					{
-						Name:  "operator",
-						Image: "quay.io/redhatgov/oc-mirror-dev@sha256:00aef3f7bd9bea8f627dbf46d2d062010ed7d8b208a98da389b701c3cae90026",
-					},
-				},
-				Properties: []property.Property{
-					property.MustBuildPackage("foo", "0.3.1"),
-				},
-			},
-			channels: []declcfg.Channel{},
-			packages: []v1alpha2.IncludePackage{
-				{
-					Name: "bar",
-					IncludeBundle: v1alpha2.IncludeBundle{
-						MinVersion: "1.0.0",
-						MaxVersion: "2.0.0",
-					},
-				},
-			},
-			expectedResult: false,
-			err:            "",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.desc, func(t *testing.T) {
-
-			isSelected, err := isPackageSelected(c.bundle, c.channels, c.packages)
-			if c.err != "" {
-				require.EqualError(t, err, c.err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, c.expectedResult, isSelected)
-				// require.ElementsMatch(t, c.expectedRelatedImages, relatedImages)
-			}
-
 		})
 	}
 }
@@ -738,68 +424,6 @@ func TestGetISConfig(t *testing.T) {
 	})
 }
 
-func TestUntarLayers(t *testing.T) {
-	type spec struct {
-		desc               string
-		configsPath        string
-		expectedSubFolders []string
-		err                string
-	}
-	cases := []spec{
-		{
-			desc:               "nominal case",
-			configsPath:        filepath.Join(testdata, blobsPath, "cac5b2f40be10e552461651655ca8f3f6ba3f65f41ecf4345efbcf1875415db6"),
-			expectedSubFolders: []string{"node-observability-operator", "aws-load-balancer-operator"},
-			err:                "",
-		},
-		{
-			desc:               "layer is not a tar.gz fails",
-			configsPath:        filepath.Join(rottenLayer, blobsPath, "1a6ae3d35ced1c7654b3bf1a66b8a513d2ee7f497728e0c5c74841807c4b8e77"),
-			expectedSubFolders: nil,
-			err:                "UntarLayers: NewReader failed - gzip: invalid header",
-		},
-		{
-			desc:               "layer doesnt contain configs folder",
-			configsPath:        filepath.Join(otherLayer, blobsPath, "cac5b2f40be10e552461651655ca8f3f6ba3f65f41ecf4345efbcf1875415db6"),
-			expectedSubFolders: []string{},
-			err:                "",
-		},
-	}
-	for _, c := range cases {
-		tmpdir := t.TempDir()
-		t.Run(c.desc, func(t *testing.T) {
-			//Untar the configs blob to tmpdir
-			stream, err := os.Open(c.configsPath)
-			if err != nil {
-				t.Fatalf("unable to open %s: %v", c.configsPath, err)
-			}
-			err = UntarLayers(stream, tmpdir, "configs/")
-			if c.err != "" {
-				require.EqualError(t, err, c.err)
-			} else {
-				require.NoError(t, err)
-				f, err := os.Open(filepath.Join(tmpdir, "configs"))
-				if err != nil && len(c.expectedSubFolders) == 0 {
-					//here the filter caught 0 configs folder, so the error is normal
-					return
-				} else if err != nil && len(c.expectedSubFolders) > 0 {
-					t.Errorf("unable to open the untarred folder: %v", err)
-					t.Fail()
-				}
-				subfolders, err := f.Readdir(0)
-				if err != nil {
-					t.Errorf("unable to read untarred folder contents: %v", err)
-					t.Fail()
-				}
-				require.Equal(t, len(c.expectedSubFolders), len(subfolders))
-				for _, sf := range subfolders {
-					require.Contains(t, c.expectedSubFolders, sf.Name())
-				}
-			}
-		})
-	}
-}
-
 func TestFirstAvailableMirror(t *testing.T) {
 	type spec struct {
 		desc      string
@@ -865,7 +489,7 @@ func TestFirstAvailableMirror(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
-			mirror, err := findFirstAvailableMirror(context.TODO(), c.mirrors, c.imageName, c.prefix, c.regFuncs)
+			mirror, err := findFirstAvailableMirror(context.TODO(), nil, c.mirrors, c.imageName, c.prefix, c.regFuncs)
 
 			if c.expErr != "" {
 				require.EqualError(t, err, c.expErr)
@@ -1088,7 +712,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "no targetName, targetTag",
 			operator: v1alpha2.Operator{
-				Catalog: "oci://" + testdata,
+				Catalog: fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 			},
 			destReg:     "localhost:5000",
 			namespace:   "disconnected_ocp",
@@ -1098,7 +722,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "with targetName, no targetTag",
 			operator: v1alpha2.Operator{
-				Catalog:    "oci://" + testdata,
+				Catalog:    fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 				TargetName: "rhopi",
 			},
 			destReg:     "localhost:5000",
@@ -1109,7 +733,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "with targetTag and no targetName",
 			operator: v1alpha2.Operator{
-				Catalog:   "oci://" + testdata,
+				Catalog:   fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 				TargetTag: "v12",
 			},
 			destReg:     "localhost:5000",
@@ -1120,7 +744,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "with targetTag and targetName",
 			operator: v1alpha2.Operator{
-				Catalog:    "oci://" + testdata,
+				Catalog:    fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 				TargetTag:  "v12",
 				TargetName: "rhopi",
 			},
@@ -1132,7 +756,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "with targetCatalog",
 			operator: v1alpha2.Operator{
-				Catalog:       "oci://" + testdata,
+				Catalog:       fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 				TargetTag:     "v12",
 				TargetCatalog: "chosen_ns/rhopi",
 			},
@@ -1144,7 +768,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "destReg empty",
 			operator: v1alpha2.Operator{
-				Catalog: "oci://" + testdata,
+				Catalog: fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 			},
 			destReg:     "",
 			namespace:   "disconnected_ocp",
@@ -1154,7 +778,7 @@ func TestPrepareDestCatalogRef(t *testing.T) {
 		{
 			desc: "namespace empty",
 			operator: v1alpha2.Operator{
-				Catalog: "oci://" + testdata,
+				Catalog: fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 			},
 			destReg:     "localhost:5000",
 			namespace:   "",
@@ -1188,9 +812,9 @@ func TestAddCatalogToMapping(t *testing.T) {
 		{
 			desc: "source FBC digest provided",
 			operator: v1alpha2.Operator{
-				Catalog: "oci://" + testdata,
+				Catalog: fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 			},
-			digest:  digest.FromString("just for testing"),
+			digest:  "sha256:c7c89df4a1f53d7e619080245c4784b6f5e6232fb71e98d981b89799ae578262",
 			destRef: "docker://localhost:5000/disconnected_ocp/redhat-operator-index:4.12",
 			expMapping: image.TypedImageMapping{
 
@@ -1202,7 +826,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 							Namespace: "artifacts",
 							Name:      "rhop-ctlg-oci",
 							Tag:       "",
-							ID:        digest.FromString("just for testing").String(),
+							ID:        "sha256:3986c6e039692ada9b5fa79ce51ce49bf6b24bc3af91d96e6c9d3d72f8077401",
 						},
 						OCIFBCPath: "oci://testdata/artifacts/rhop-ctlg-oci",
 					},
@@ -1216,7 +840,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 							Namespace: "disconnected_ocp",
 							Name:      "redhat-operator-index",
 							Tag:       "4.12",
-							ID:        digest.FromString("just for testing").String(),
+							ID:        "sha256:3986c6e039692ada9b5fa79ce51ce49bf6b24bc3af91d96e6c9d3d72f8077401",
 						},
 						OCIFBCPath: "",
 					},
@@ -1229,7 +853,7 @@ func TestAddCatalogToMapping(t *testing.T) {
 		{
 			desc: "source FBC, digest not provided",
 			operator: v1alpha2.Operator{
-				Catalog: "oci://" + testdata,
+				Catalog: fmt.Sprintf("%s//%s", v1alpha2.OCITransportPrefix, testdata),
 			},
 			digest:      "",
 			destRef:     "docker://localhost:5000/disconnected_ocp/redhat-operator-index:v4.12",
@@ -1293,13 +917,12 @@ func TestAddCatalogToMapping(t *testing.T) {
 
 func TestAddRelatedImageToMapping(t *testing.T) {
 	type spec struct {
-		desc       string
-		options    *MirrorOptions
-		img        declcfg.RelatedImage
-		destReg    string
-		namespace  string
-		expErr     string
-		expMapping image.TypedImageMapping
+		desc           string
+		options        *MirrorOptions
+		img            declcfg.RelatedImage
+		targetLocation string
+		expErr         string
+		expMapping     image.TypedImageMapping
 	}
 	cases := []spec{
 		{
@@ -1307,48 +930,45 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 			expErr:     "",
 			expMapping: image.TypedImageMapping{},
 			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
+				From:      "",
 				ToMirror:  "test.registry.io",
-				OutputDir: testdata,
+				OutputDir: "",
 			},
 			img: declcfg.RelatedImage{
 				Name:  "noRef",
 				Image: "",
 			},
-			destReg:   "localhost:5000",
-			namespace: "disconnectedOCP",
+			targetLocation: "localhost:5000/disconnectedOCP",
 		},
 		{
 			desc:       "destination namespace is uppercase fails",
 			expErr:     "\"localhost:5000/disconnectedOCP/okd/scos-content:4.12.0-0.okd-scos-2022-10-22-232744-branding\" is not a valid image reference: repository name must be lowercase",
 			expMapping: image.TypedImageMapping{},
 			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
+				From:      "",
 				ToMirror:  "test.registry.io",
-				OutputDir: testdata,
+				OutputDir: "",
 			},
 			img: declcfg.RelatedImage{
 				Name:  "scos-content",
 				Image: "quay.io/okd/scos-content:4.12.0-0.okd-scos-2022-10-22-232744-branding",
 			},
-			destReg:   "localhost:5000",
-			namespace: "disconnectedOCP",
+			targetLocation: "localhost:5000/disconnectedOCP",
 		},
 		{
-			desc:   "nominal case passes",
+			desc:   "nominal case for MirrorToMirror passes",
 			expErr: "",
 			expMapping: image.TypedImageMapping{
 
 				image.TypedImage{
 					TypedImageReference: image.TypedImageReference{
-						Type: "file",
+						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "registry.redhat.io",
 							Namespace: "openshift-logging",
-							//Name:      "cluster-logging-rhel8-operator/2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429",
-							Name: "cluster-logging-rhel8-operator",
-							Tag:  "",
-							ID:   "sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429"},
+							Name:      "cluster-logging-rhel8-operator",
+							Tag:       "",
+							ID:        "sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429"},
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
@@ -1366,16 +986,15 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 				},
 			},
 			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
+				From:      "",
 				ToMirror:  "test.registry.io",
-				OutputDir: testdata,
+				OutputDir: "",
 			},
 			img: declcfg.RelatedImage{
 				Name:  "cluster-logging-operator",
 				Image: "registry.redhat.io/openshift-logging/cluster-logging-rhel8-operator@sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429",
 			},
-			destReg:   "localhost:5000",
-			namespace: "disconnected-ocp",
+			targetLocation: "localhost:5000/disconnected-ocp",
 		},
 		{
 			desc:   "destination namespace is empty passes",
@@ -1384,14 +1003,13 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 
 				image.TypedImage{
 					TypedImageReference: image.TypedImageReference{
-						Type: "file",
+						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
 							Namespace: "okd",
-							//Name:      "scos-content/" + fmt.Sprintf("%x", sha256.Sum256([]byte("4.12.0-0.okd-scos-2022-10-22-232744-branding")))[0:6],
-							Name: "scos-content",
-							Tag:  "4.12.0-0.okd-scos-2022-10-22-232744-branding",
-							ID:   ""},
+							Name:      "scos-content",
+							Tag:       "4.12.0-0.okd-scos-2022-10-22-232744-branding",
+							ID:        ""},
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
@@ -1409,16 +1027,15 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 				},
 			},
 			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
+				From:      "",
 				ToMirror:  "test.registry.io",
-				OutputDir: testdata,
+				OutputDir: "",
 			},
 			img: declcfg.RelatedImage{
 				Name:  "scos-content",
 				Image: "quay.io/okd/scos-content:4.12.0-0.okd-scos-2022-10-22-232744-branding",
 			},
-			destReg:   "localhost:5000",
-			namespace: "",
+			targetLocation: "localhost:5000",
 		},
 		{
 			desc:   "source namespace is empty passes",
@@ -1427,14 +1044,13 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 
 				image.TypedImage{
 					TypedImageReference: image.TypedImageReference{
-						Type: "file",
+						Type: "docker",
 						Ref: reference.DockerImageReference{
 							Registry:  "quay.io",
 							Namespace: "",
-							//Name:      fmt.Sprintf("%x", sha256.Sum256([]byte("4.12.0-0.okd-scos-2022-10-22-232744-branding")))[0:6],
-							Name: "scos-content",
-							Tag:  "4.12.0-0.okd-scos-2022-10-22-232744-branding",
-							ID:   ""},
+							Name:      "scos-content",
+							Tag:       "4.12.0-0.okd-scos-2022-10-22-232744-branding",
+							ID:        ""},
 					},
 					Category: v1alpha2.TypeOperatorRelatedImage,
 				}: image.TypedImage{
@@ -1452,23 +1068,71 @@ func TestAddRelatedImageToMapping(t *testing.T) {
 				},
 			},
 			options: &MirrorOptions{
-				From:      v1alpha2.OCITransportPrefix + testdata,
+				From:      "",
 				ToMirror:  "test.registry.io",
-				OutputDir: testdata,
+				OutputDir: "",
 			},
 			img: declcfg.RelatedImage{
 				Name:  "scos-content",
 				Image: "quay.io/scos-content:4.12.0-0.okd-scos-2022-10-22-232744-branding",
 			},
-			destReg:   "localhost:5000",
-			namespace: "disconnected_ocp",
+			targetLocation: "localhost:5000/disconnected_ocp",
+		},
+		{
+			desc:   "nominal case for MirrorToDisk passes",
+			expErr: "",
+			expMapping: image.TypedImageMapping{
+
+				image.TypedImage{
+					TypedImageReference: image.TypedImageReference{
+						Type: "docker",
+						Ref: reference.DockerImageReference{
+							Registry:  "registry.redhat.io",
+							Namespace: "openshift-logging",
+							Name:      "cluster-logging-rhel8-operator",
+							Tag:       "",
+							ID:        "sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429"},
+					},
+					Category: v1alpha2.TypeOperatorRelatedImage,
+				}: image.TypedImage{
+					TypedImageReference: image.TypedImageReference{
+						Type: "file",
+						Ref: reference.DockerImageReference{
+							Registry:  "",
+							Namespace: "namespace",
+							Name:      "catalog/openshift-logging/cluster-logging-rhel8-operator",
+							Tag:       "2881fc",
+							ID:        "sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429",
+						},
+					},
+					Category: v1alpha2.TypeOperatorRelatedImage,
+				},
+			},
+			options: &MirrorOptions{
+				From:      "",
+				ToMirror:  "",
+				OutputDir: testdata,
+			},
+			img: declcfg.RelatedImage{
+				Name:  "cluster-logging-operator",
+				Image: "registry.redhat.io/openshift-logging/cluster-logging-rhel8-operator@sha256:2881fc4ddeea9a1d244c37c0216c7d6c79a572757bce007520523c9120e66429",
+			},
+			targetLocation: "file://namespace/catalog",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
 			mapping := image.TypedImageMapping{}
-			err := c.options.addRelatedImageToMapping(context.TODO(), mapping, c.img, c.destReg, c.namespace)
-
+			syncMap := sync.Map{}
+			err := c.options.addRelatedImageToMapping(context.TODO(), &syncMap, c.img, c.targetLocation)
+			// convert to a more easily testable map type
+			syncMap.Range(func(key, value any) bool {
+				source := key.(image.TypedImage)
+				destination := value.(image.TypedImage)
+				mapping[source] = destination
+				// always continue iteration
+				return true
+			})
 			if c.expErr != "" {
 				require.EqualError(t, err, c.expErr)
 			} else {

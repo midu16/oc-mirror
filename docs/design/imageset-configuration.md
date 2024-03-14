@@ -4,6 +4,7 @@ Design: oc-mirror Imageset Configuration
 - [Design: oc-mirror Imageset Configuration](#design-oc-mirror-imageset-configuration)
 - [Content Types](#content-types)
   - [Platforms](#platforms)
+    - [Architectures](#architectures)
   - [Operators](#operators)
   - [Additional Images](#additional-images)
   - [Helm Chart](#helm-chart)
@@ -16,9 +17,13 @@ Design: oc-mirror Imageset Configuration
 
 ## Platforms
 
-Release channels for container management platforms can be specified for mirroring. 
+Release channels for container management platforms can be specified for mirroring.
 Currently, OpenShift Container Platform is supported by all `oc-mirror` commands.
 OKD is a supported type in the imageset configuration, but not by the `oc-mirror` list commands.
+
+### Architectures
+
+This is the list of release payload architectures that will be mirrored. An empty value will default to `amd64`. Additional supported values are: `arm64`, `ppc64le`, `s390x`, and `multi`. Note, `multi` is a [schema2](https://github.com/opencontainers/image-spec/blob/main/image-index.md#example-image-index) (aka "fat" manifest) list of all 4 architectures. Therefore it will use ~4x more registry space than a single architecure release.
 
 ## Operators
 
@@ -50,8 +55,20 @@ mirror:
         charts:
           - name: podinfo
             version: 5.0.0
-            imagePaths: 
+            imagePaths:
             - "{.spec.template.spec.custom[*].image}"
+```
+
+If you want to mirror all charts present in a repository you can just specify the url. Example:
+
+```
+apiVersion: mirror.openshift.io/v1alpha2
+kind: ImageSetConfiguration
+mirror:
+  helm:
+    repositories:
+      - name: podinfo
+        url: https://stefanprodan.github.io/podinfo
 ```
 
 # Limitations
@@ -65,7 +82,7 @@ OKD is supported by the mirroring process but not the discovery `list` tools.
 
 ## Helm Charts
 
-- Private repositories are currently not supported. 
+- Private repositories are currently not supported.
 - Helm charts that require alterations to the `values.yaml` to render are not currently supported.
 
 

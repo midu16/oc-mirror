@@ -161,14 +161,19 @@ func ReadImageMapping(mappingsPath, separator string, typ v1alpha2.ImageType) (T
 }
 
 // WriteImageMapping writes key map k/v to an io.Writer.
-func WriteImageMapping(m TypedImageMapping, output io.Writer) error {
-	for fromStr, toStr := range m {
+func WriteImageMapping(nestedPaths int, m TypedImageMapping, output io.Writer) error {
+	var strFrom, strTo string
+	for fromImage, toImage := range m {
 		// Prefer tag over id for mapping file for
 		// compatability with `oc image mirror`.
-		if toStr.Ref.Tag != "" {
-			toStr.Ref.ID = ""
+		if toImage.Ref.Tag != "" {
+			toImage.Ref.ID = ""
 		}
-		_, err := output.Write([]byte(fmt.Sprintf("%s=%s\n", fromStr.Ref.Exact(), toStr.Ref.Exact())))
+
+		strFrom = fromImage.String()
+		strTo = toImage.String()
+
+		_, err := output.Write([]byte(fmt.Sprintf("%s=%s\n", strFrom, strTo)))
 		if err != nil {
 			return err
 		}

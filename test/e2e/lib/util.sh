@@ -4,7 +4,7 @@
 # needed to run against a local test registry and provide informative
 # debug data in case of test errors.
 function run_cmd() {
-  local test_flags="--verbose=4 --dest-use-http --skip-cleanup"
+  local test_flags="--verbose=4 --dest-use-http --skip-cleanup --oci-insecure-signature-policy"
 
   echo "$CMD" "$@" $test_flags
   echo
@@ -16,14 +16,18 @@ function cleanup_all() {
     # check the PID's before 'killing'
     if [[ -n $PID_DISCONN ]];
     then
-        kill $PID_DISCONN
+      if ps ax | grep -v grep | grep $PID_DISCONN > /dev/null; then
+        kill  -9 $PID_DISCONN
         PID_DISONN=""
+      fi
     fi
 
     if [[ -n $PID_CONN ]];
     then
-        kill $PID_CONN
+      if ps ax | grep -v grep | grep $PID_CONN > /dev/null; then
+        kill -9 $PID_CONN
         PID_CON=""
+      fi
     fi
 
     if [[ -n $PID_GO ]];
@@ -43,18 +47,44 @@ function cleanup_conn() {
 
 # install_deps will install crane and registry2 in go bin dir
 function install_deps() {
-  pushd ${DATA_TMP}
-  GOFLAGS=-mod=mod go install github.com/google/go-containerregistry/cmd/crane@latest
-  popd
-  crane export registry:2 registry2.tar
-  tar xvf registry2.tar bin/registry
-  mv bin/registry $GOBIN
-  crane export quay.io/operator-framework/opm@sha256:d31c6ea5c50be93d6eb94d2b508f0208e84a308c011c6454ebf291d48b37df19 opm.tar
-  tar xvf opm.tar bin/opm
-  mv bin/opm $GOBIN
-  rm -f registry2.tar opm.tar
-  wget -O $GOBIN/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
-  chmod +x $GOBIN/jq
+  if [ "$(arch)" == "x86_64" ]
+  then
+    pushd ${DATA_TMP}
+    GOFLAGS=-mod=mod go install github.com/google/go-containerregistry/cmd/crane@latest
+    popd
+    crane export registry:2 registry2.tar
+    tar xvf registry2.tar bin/registry
+    mv bin/registry $GOBIN
+    crane export quay.io/operator-framework/opm:v1.27.1 opm.tar
+    tar xvf opm.tar bin/opm
+    mv bin/opm $GOBIN
+    rm -f registry2.tar opm.tar
+    wget -O $GOBIN/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
+    chmod +x $GOBIN/jq
+  else
+    # non-x86_64 flow
+    pushd ${DATA_TMP}
+
+    # For ppc64le, this is compiled with Power9 compatibility (does not run on Power8)
+    ARCH=$(arch | sed 's|aarch64|arm64|g')
+    curl -o $GOBIN/opm -L https://github.com/operator-framework/operator-registry/releases/download/v1.27.1/linux-${ARCH}-opm
+    chmod +x $GOBIN/opm
+
+    GOFLAGS=-mod=mod go install github.com/google/go-containerregistry/cmd/crane@latest
+    mv ~/go/bin/crane $GOBIN/
+
+    if [ "${ARCH}" == "arm64" ]
+    then
+      crane export --platform linux/arm64/v8 registry:2 registry2.tar
+    else
+      crane export ${ARCH}/registry:2 registry2.tar
+    fi
+    tar xvf registry2.tar bin/registry
+    mv bin/registry $GOBIN
+    rm registry2.tar
+
+    popd
+  fi
 }
 
 # setup_reg will configure and start registry2 processes
@@ -169,6 +199,27 @@ function setup_helm_testdata() {
   mkdir -p "$OUTPUT_DIR"
   cp "${DIR}/configs/${CONFIG_PATH}" "${OUTPUT_DIR}/"
   cp "${DIR}/artifacts/${CHART_PATH}" "${DATA_DIR}/"
+  find "$DATA_DIR" -type f -exec sed -i -E 's@DATA_TMP@'"$DATA_DIR"'@g' {} \;
+}
+
+# setup_helm_repository_testdata will move required
+# files in place to do helm testing
+function setup_helm_repository_testdata() {
+  local DATA_DIR="${1:?DATA_DIR required}"
+  local OUTPUT_DIR="${2:?OUTPUT_DIR required}"
+  local CONFIG_PATH="${3:?CONFIG_PATH required}"
+  export HELM_CACHE_HOME=$DATA_DIR
+  export XDG_DATA_HOME=$DATA_DIR
+  export XDG_CACHE_HOME=$DATA_DIR
+  export HELM_CONFIG_HOME=$DATA_DIR
+  export HELM_REPOSITORY_CACHE=$DATA_DIR
+  echo -e "\nSetting up test directory in $DATA_DIR"
+  mkdir -p "$OUTPUT_DIR"
+  curl -L https://mirror.openshift.com/pub/openshift-v4/clients/helm/latest/helm-linux-amd64 -o ./helm
+  chmod +x ./helm
+  ./helm repo add sbo https://redhat-developer.github.io/service-binding-operator-helm-chart/
+  cp "${DIR}/configs/${CONFIG_PATH}" "${OUTPUT_DIR}/"
+  cp -a "${DIR}/artifacts/." "${DATA_DIR}/"
   find "$DATA_DIR" -type f -exec sed -i -E 's@DATA_TMP@'"$DATA_DIR"'@g' {} \;
 }
 

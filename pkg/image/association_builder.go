@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -144,7 +143,7 @@ func associateLocalImageLayers(image, localRoot, dirRef, tagOrID, defaultTag str
 	default:
 		return nil, fmt.Errorf("expected symlink or regular file mode, got: %b", m)
 	}
-	manifestBytes, err := ioutil.ReadFile(filepath.Clean(manifestPath))
+	manifestBytes, err := os.ReadFile(filepath.Clean(manifestPath))
 	if err != nil {
 		return nil, fmt.Errorf("error reading image manifest file: %v", err)
 	}
@@ -344,4 +343,5 @@ var preferManifestList = distribution.WithManifestMediaTypes([]string{
 	manifestlist.MediaTypeManifestList,
 	schema2.MediaTypeManifest,
 	imgspecv1.MediaTypeImageManifest,
+	imgspecv1.MediaTypeImageIndex,
 })

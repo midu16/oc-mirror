@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -1890,7 +1891,7 @@ func TestDiffHeadsOnly(t *testing.T) {
 						{Name: "etcd.v0.9.1", Replaces: "etcd.v0.9.0"},
 						{Name: "etcd.v0.9.2", Replaces: "etcd.v0.9.1"},
 						{Name: "etcd.v0.9.3", Replaces: "etcd.v0.9.2"},
-						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.1", "etcd.v0.9.2", "etcd.v0.9.3"}},
+						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3"},
 					}},
 					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "foo", Entries: []declcfg.ChannelEntry{
 						{Name: "foo.v0.1.0"},
@@ -1991,7 +1992,7 @@ func TestDiffHeadsOnly(t *testing.T) {
 						{Name: "etcd.v0.9.1", Replaces: "etcd.v0.9.0"},
 						{Name: "etcd.v0.9.2", Replaces: "etcd.v0.9.1"},
 						{Name: "etcd.v0.9.3", Replaces: "etcd.v0.9.2"},
-						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.1", "etcd.v0.9.2", "etcd.v0.9.3"}},
+						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3"},
 					}},
 					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "foo", Entries: []declcfg.ChannelEntry{
 						{Name: "foo.v0.1.0"},
@@ -2037,6 +2038,159 @@ func TestDiffHeadsOnly(t *testing.T) {
 							property.MustBuildGVK("etcd.database.coreos.com", "v1", "EtcdBackup"),
 							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
 							property.MustBuildPackage("etcd", "0.9.3"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "etcd.v1.0.0",
+						Package: "etcd",
+						Image:   "reg/etcd:latest",
+						Properties: []property.Property{
+							property.MustBuildGVK("etcd.database.coreos.com", "v1", "EtcdBackup"),
+							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
+							property.MustBuildPackage("etcd", "1.0.0"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "foo.v0.1.0",
+						Package: "foo",
+						Image:   "reg/foo:latest",
+						Properties: []property.Property{
+							property.MustBuildPackage("foo", "0.1.0"),
+							property.MustBuildPackageRequired("etcd", "<0.9.2"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "HasDiff/SelectDependencies/SkipHeadSkipsList",
+			newCfg: declcfg.DeclarativeConfig{
+				Packages: []declcfg.Package{
+					{Schema: declcfg.SchemaPackage, Name: "etcd", DefaultChannel: "stable"},
+					{Schema: declcfg.SchemaPackage, Name: "foo", DefaultChannel: "stable"},
+					{Schema: declcfg.SchemaPackage, Name: "bar", DefaultChannel: "stable"},
+				},
+				Channels: []declcfg.Channel{
+					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "etcd", Entries: []declcfg.ChannelEntry{
+						{Name: "etcd.v0.9.0"},
+						{Name: "etcd.v0.9.1", Replaces: "etcd.v0.9.0"},
+						{Name: "etcd.v0.9.2", Replaces: "etcd.v0.9.1"},
+						{Name: "etcd.v0.9.3", Replaces: "etcd.v0.9.2"},
+						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.1", "etcd.v0.9.2", "etcd.v0.9.3"}},
+					}},
+					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "foo", Entries: []declcfg.ChannelEntry{
+						{Name: "foo.v0.1.0"},
+					}},
+					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "bar", Entries: []declcfg.ChannelEntry{
+						{Name: "bar.v0.1.0"},
+					}},
+				},
+				Bundles: []declcfg.Bundle{
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "foo.v0.1.0",
+						Package: "foo",
+						Image:   "reg/foo:latest",
+						Properties: []property.Property{
+							property.MustBuildPackageRequired("etcd", "<0.9.2"),
+							property.MustBuildPackage("foo", "0.1.0"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "bar.v0.1.0",
+						Package: "bar",
+						Image:   "reg/bar:latest",
+						Properties: []property.Property{
+							property.MustBuildGVKRequired("etcd.database.coreos.com", "v1", "EtcdBackup"),
+							property.MustBuildPackage("bar", "0.1.0"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "etcd.v0.9.0",
+						Package: "etcd",
+						Image:   "reg/etcd:latest",
+						Properties: []property.Property{
+							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
+							property.MustBuildPackage("etcd", "0.9.0"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "etcd.v0.9.1",
+						Package: "etcd",
+						Image:   "reg/etcd:latest",
+						Properties: []property.Property{
+							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
+							property.MustBuildPackage("etcd", "0.9.1"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "etcd.v0.9.2",
+						Package: "etcd",
+						Image:   "reg/etcd:latest",
+						Properties: []property.Property{
+							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
+							property.MustBuildPackage("etcd", "0.9.2"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "etcd.v0.9.3",
+						Package: "etcd",
+						Image:   "reg/etcd:latest",
+						Properties: []property.Property{
+							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
+							property.MustBuildGVK("etcd.database.coreos.com", "v1", "EtcdBackup"),
+							property.MustBuildPackage("etcd", "0.9.3"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "etcd.v1.0.0",
+						Package: "etcd",
+						Image:   "reg/etcd:latest",
+						Properties: []property.Property{
+							property.MustBuildGVK("etcd.database.coreos.com", "v1beta2", "EtcdBackup"),
+							property.MustBuildGVK("etcd.database.coreos.com", "v1", "EtcdBackup"),
+							property.MustBuildPackage("etcd", "1.0.0"),
+						},
+					},
+				},
+			},
+			g: &DiffGenerator{
+				HeadsOnly: true,
+			},
+			expCfg: declcfg.DeclarativeConfig{
+				Packages: []declcfg.Package{
+					{Schema: declcfg.SchemaPackage, Name: "bar", DefaultChannel: "stable"},
+					{Schema: declcfg.SchemaPackage, Name: "etcd", DefaultChannel: "stable"},
+					{Schema: declcfg.SchemaPackage, Name: "foo", DefaultChannel: "stable"},
+				},
+				Channels: []declcfg.Channel{
+					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "bar", Entries: []declcfg.ChannelEntry{
+						{Name: "bar.v0.1.0"},
+					}},
+					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "etcd", Entries: []declcfg.ChannelEntry{
+						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.1", "etcd.v0.9.2", "etcd.v0.9.3"}},
+					}},
+					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "foo", Entries: []declcfg.ChannelEntry{
+						{Name: "foo.v0.1.0"},
+					}},
+				},
+				Bundles: []declcfg.Bundle{
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "bar.v0.1.0",
+						Package: "bar",
+						Image:   "reg/bar:latest",
+						Properties: []property.Property{
+							property.MustBuildGVKRequired("etcd.database.coreos.com", "v1", "EtcdBackup"),
+							property.MustBuildPackage("bar", "0.1.0"),
 						},
 					},
 					{
@@ -2230,7 +2384,7 @@ func TestDiffHeadsOnly(t *testing.T) {
 						{Name: "etcd.v0.9.1", Replaces: "etcd.v0.9.0"},
 						{Name: "etcd.v0.9.2", Replaces: "etcd.v0.9.1"},
 						{Name: "etcd.v0.9.3", Replaces: "etcd.v0.9.2"},
-						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.1", "etcd.v0.9.2", "etcd.v0.9.3"}},
+						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.2", "etcd.v0.9.3"}},
 					}},
 					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "foo", Entries: []declcfg.ChannelEntry{
 						{Name: "foo.v0.1.0"},
@@ -2346,7 +2500,7 @@ func TestDiffHeadsOnly(t *testing.T) {
 						{Name: "etcd.v0.9.1", Replaces: "etcd.v0.9.0"},
 						{Name: "etcd.v0.9.2", Replaces: "etcd.v0.9.1"},
 						{Name: "etcd.v0.9.3", Replaces: "etcd.v0.9.2"},
-						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.1", "etcd.v0.9.2", "etcd.v0.9.3"}},
+						{Name: "etcd.v1.0.0", Replaces: "etcd.v0.9.3", Skips: []string{"etcd.v0.9.2", "etcd.v0.9.3"}},
 					}},
 					{Schema: declcfg.SchemaChannel, Name: "stable", Package: "foo", Entries: []declcfg.ChannelEntry{
 						{Name: "foo.v0.1.0"},
@@ -3651,7 +3805,108 @@ func TestSetDefaultChannelRange(t *testing.T) {
 							property.MustBuildPackage("ibm-mq", "1.7.0"),
 						},
 					},
+				},
+			},
+		},
+
+		{
+			name:   "ibm-mq-test/Valid/OverrideDefaultChannel",
+			oldCfg: declcfg.DeclarativeConfig{},
+			newCfg: declcfg.DeclarativeConfig{
+				Packages: []declcfg.Package{
+					{Schema: declcfg.SchemaPackage, Name: "ibm-mq", DefaultChannel: "v1.8"},
+				},
+				Channels: []declcfg.Channel{
+					{Schema: declcfg.SchemaChannel, Name: "v1.8", Package: "ibm-mq", Entries: []declcfg.ChannelEntry{
+						{Name: "ibm-mq.v1.8.1"}},
+						Properties: []property.Property{
+							property.MustBuildChannelPriority("v1.8", 3),
+						},
+					},
+					{Schema: declcfg.SchemaChannel, Name: "v1.7", Package: "ibm-mq", Entries: []declcfg.ChannelEntry{
+						{Name: "ibm-mq.v1.7.0"}},
+						Properties: []property.Property{
+							property.MustBuildChannelPriority("v1.7", 1),
+						},
+					},
+					{Schema: declcfg.SchemaChannel, Name: "v1.6", Package: "ibm-mq", Entries: []declcfg.ChannelEntry{
+						{Name: "ibm-mq.v1.6.0"}},
+						Properties: []property.Property{
+							property.MustBuildChannelPriority("v1.6", 2),
+						},
+					},
+				},
+				Bundles: []declcfg.Bundle{
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "ibm-mq.v1.6.0",
+						Package: "ibm-mq",
+						Image:   "reg/ibm-mq:latest",
+						Properties: []property.Property{
+							property.MustBuildPackage("ibm-mq", "1.6.0"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "ibm-mq.v1.7.0",
+						Package: "ibm-mq",
+						Image:   "reg/ibm-mq:latest",
+						Properties: []property.Property{
+							property.MustBuildPackage("ibm-mq", "1.7.0"),
+						},
+					},
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "ibm-mq.v1.8.1",
+						Package: "ibm-mq",
+						Image:   "reg/ibm-mq:latest",
+						Properties: []property.Property{
+							property.MustBuildPackage("ibm-mq", "1.8.1"),
+						},
+					},
 				}},
+			g: &DiffGenerator{
+				IncludeAdditively: false,
+				HeadsOnly:         false,
+				SkipDependencies:  true,
+				Includer: DiffIncluder{
+					Packages: []DiffIncludePackage{
+						{
+							Name: "ibm-mq",
+							Channels: []DiffIncludeChannel{
+								{
+									Name: "v1.7",
+								},
+							},
+							DefaultChannel: "v1.7",
+						},
+					},
+				},
+			},
+			expCfg: declcfg.DeclarativeConfig{
+				Packages: []declcfg.Package{
+					{Schema: declcfg.SchemaPackage, Name: "ibm-mq", DefaultChannel: "v1.7"},
+				},
+				Channels: []declcfg.Channel{
+					{Schema: declcfg.SchemaChannel, Name: "v1.7", Package: "ibm-mq", Entries: []declcfg.ChannelEntry{
+						{Name: "ibm-mq.v1.7.0"}},
+						Properties: []property.Property{
+							property.MustBuildChannelPriority("v1.7", 1),
+						},
+					},
+				},
+				Bundles: []declcfg.Bundle{
+					{
+						Schema:  declcfg.SchemaBundle,
+						Name:    "ibm-mq.v1.7.0",
+						Package: "ibm-mq",
+						Image:   "reg/ibm-mq:latest",
+						Properties: []property.Property{
+							property.MustBuildPackage("ibm-mq", "1.7.0"),
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -3661,9 +3916,6 @@ func TestSetDefaultChannelRange(t *testing.T) {
 				s.assertion = require.NoError
 			}
 
-			//oldModel, err := declcfg.ConvertToModel(s.oldCfg)
-			//require.NoError(t, err)
-
 			newModel, err := declcfg.ConvertToModel(s.newCfg)
 			require.NoError(t, err)
 
@@ -3672,7 +3924,6 @@ func TestSetDefaultChannelRange(t *testing.T) {
 
 			if err := outputModel.Validate(); err != nil {
 				fmt.Println(err)
-				//return nil, err
 			}
 
 			outputCfg := declcfg.ConvertFromModel(outputModel)
@@ -3774,7 +4025,7 @@ func TestSetDefaultChannelRange2(t *testing.T) {
 			//oldModel, err := declcfg.ConvertToModel(s.oldCfg)
 			//require.NoError(t, err)
 
-			newCfg, err := declcfg.LoadFS(s.fsys)
+			newCfg, err := declcfg.LoadFS(context.Background(), s.fsys)
 			if err != nil {
 				fmt.Println(err)
 			}

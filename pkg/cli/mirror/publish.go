@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/openshift/library-go/pkg/image/reference"
@@ -15,6 +17,7 @@ import (
 	"github.com/openshift/oc/pkg/cli/image/imagesource"
 	imagemanifest "github.com/openshift/oc/pkg/cli/image/manifest"
 	imgmirror "github.com/openshift/oc/pkg/cli/image/mirror"
+	"golang.org/x/exp/slices"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/klog/v2"
 
@@ -182,8 +185,10 @@ func (o *MirrorOptions) handleMetadata(ctx context.Context, tmpdir string, files
 
 	// Read in current metadata, if present
 	berr := backend.ReadMetadata(ctx, &curr, config.MetadataBasePath)
-	if err := o.checkSequence(incoming, curr, berr); err != nil {
-		return backend, incoming, curr, err
+	if !o.SkipPruning {
+		if err := o.checkSequence(incoming, curr, berr); err != nil {
+			return backend, incoming, curr, err
+		}
 	}
 	return backend, incoming, curr, nil
 }
@@ -354,7 +359,10 @@ func (o *MirrorOptions) processCustomImages(ctx context.Context, dir string, fil
 	}
 
 	if found {
-		graphRef, err := o.buildGraphImage(ctx, dir)
+
+		// copy signatures to Cincinnati graph data directory before building the graph data image
+		srcSignatureDir := filepath.Join(o.OutputDir, config.ReleaseSignatureDir)
+		graphRef, err := o.buildGraphImage(ctx, srcSignatureDir, dir)
 		if err != nil {
 			return allMappings, fmt.Errorf("error building cincinnati graph image: %v", err)
 		}
@@ -447,16 +455,95 @@ func (o *MirrorOptions) fetchBlob(ctx context.Context, regctx *registryclient.Co
 }
 
 func unpack(archiveFilePath, dest string, filesInArchive map[string]string) error {
-	archivePath, found := filesInArchive[archiveFilePath]
-	if !found {
+	archivePaths := getArchivePathsFromMap(filesInArchive, archiveFilePath)
+
+	if len(archivePaths) == 0 {
 		return &ErrArchiveFileNotFound{archiveFilePath}
 	}
-	if err := archive.NewArchiver().Extract(archivePath, archiveFilePath, dest); err != nil {
-		return err
+
+	for _, archivePath := range archivePaths {
+		if archiveFilePath == config.CatalogsDir {
+			err := unarchive(archivePath, dest)
+			if err != nil {
+				klog.V(2).Info("unarchive failed with the error: %s", err.Error())
+				return err
+			}
+		} else {
+			if err := archive.NewArchiver().Extract(archivePath, archiveFilePath, dest); err != nil {
+				return err
+			}
+			if _, err := os.Stat(filepath.Join(dest, archiveFilePath)); err != nil {
+				return err
+			}
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dest, archiveFilePath)); err != nil {
-		return err
+
+	return nil
+}
+
+func getArchivePathsFromMap(m map[string]string, key string) []string {
+	var archivePaths []string
+	for k, v := range m {
+		if strings.Contains(k, key) {
+			if slices.Contains(archivePaths, v) {
+				continue
+			}
+			archivePaths = append(archivePaths, v)
+		}
 	}
+	return archivePaths
+}
+
+func unarchive(archivePath, dest string) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("error opening tar %s: %v", archivePath, err)
+	}
+	reader := tar.NewReader(file)
+	for {
+		header, err := reader.Next()
+
+		// break the infinite loop when EOF
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return fmt.Errorf("error reading archive %s: %v", archivePath, err)
+		}
+
+		if header == nil {
+			continue
+		}
+		if header.Typeflag == tar.TypeReg {
+			if strings.HasPrefix(header.Name, config.CatalogsDir) {
+				fmt.Println(header.Name)
+				fpath := filepath.Join(dest, header.Name)
+
+				err := os.MkdirAll(filepath.Dir(fpath), 0755)
+				if err != nil {
+					return fmt.Errorf("%s: making directory for file: %v", fpath, err)
+				}
+
+				out, err := os.Create(fpath)
+				if err != nil {
+					return fmt.Errorf("%s: creating new file: %v", fpath, err)
+				}
+				defer out.Close()
+
+				err = out.Chmod(os.FileMode(header.Mode))
+				if err != nil {
+					return fmt.Errorf("%s: changing file mode: %v", fpath, err)
+				}
+
+				_, err = io.Copy(out, reader)
+				if err != nil {
+					return fmt.Errorf("%s: writing file: %v", fpath, err)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

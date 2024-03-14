@@ -35,6 +35,10 @@ import (
 	"github.com/openshift/oc-mirror/pkg/image"
 	"github.com/openshift/oc-mirror/pkg/metadata"
 	"github.com/openshift/oc-mirror/pkg/metadata/storage"
+
+	cliV2 "github.com/openshift/oc-mirror/v2/pkg/cli"
+	clog "github.com/openshift/oc-mirror/v2/pkg/log"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -76,8 +80,26 @@ var (
 	)
 )
 
+const (
+	tagLatest string = "latest"
+)
+
 func NewMirrorCmd() *cobra.Command {
-	o := MirrorOptions{}
+	if isV2() {
+		return buildV2Cmd()
+	} else {
+		return buildV1Cmd()
+	}
+}
+
+func isV2() bool {
+	return len(os.Args) > 0 && slices.Contains(os.Args[:], "--v2")
+}
+
+func buildV1Cmd() *cobra.Command {
+	o := MirrorOptions{
+		operatorCatalogToFullArtifactPath: map[string]string{},
+	}
 	o.RootOptions = &cli.RootOptions{
 		IOStreams: genericclioptions.IOStreams{
 			In:     os.Stdin,
@@ -122,6 +144,14 @@ func NewMirrorCmd() *cobra.Command {
 	return cmd
 }
 
+func buildV2Cmd() *cobra.Command {
+	fmt.Println("--v2 flag identified, flow redirected to the oc-mirror v2 version. PLEASE DO NOT USE that. V2 is still under development and it is not ready to be used. ")
+
+	log := clog.New("info")
+	cmd := cliV2.NewMirrorCmd(log)
+	return cmd
+}
+
 func (o *MirrorOptions) Complete(cmd *cobra.Command, args []string) error {
 
 	destination := args[0]
@@ -162,7 +192,8 @@ func (o *MirrorOptions) Complete(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		o.ToMirror = mirror.Ref.Registry
-		o.UserNamespace = mirror.Ref.AsRepository().RepositoryName()
+		// get the <namespace>/<image> portion of the docker reference only
+		o.UserNamespace = mirror.Ref.RepositoryName()
 		err = checkDockerReference(mirror, o.MaxNestedPaths)
 		if err != nil {
 			return err
@@ -198,10 +229,9 @@ func checkDockerReference(mirror imagesource.TypedImageReference, nested int) er
 		return fmt.Errorf("destination registry must consist of registry host and namespace(s) only, and must not include an image tag or ID")
 	}
 
-	depth := strings.Split(strings.Join([]string{mirror.Ref.Namespace, mirror.Ref.Name}, "/"), "/")
-	if len(depth) > nested {
-		destination := strings.Join([]string{mirror.Ref.Registry, mirror.Ref.Namespace, mirror.Ref.Name}, "/")
-		return fmt.Errorf("the max-nested-paths value (%d) for %s exceeds the registry mirror paths setting (some registries limit the nested paths)", len(depth), destination)
+	depth := strings.Split(mirror.Ref.RepositoryName(), "/")
+	if nested > 0 && (len(depth) >= nested) {
+		return fmt.Errorf("the max-nested-paths value (%d) must be strictly higher than the number of path-components in the destination %s - try increasing the value", nested, mirror.Ref.RepositoryName())
 	}
 	return nil
 }
@@ -245,40 +275,43 @@ func (o *MirrorOptions) Validate() error {
 		}
 	}
 
-	// Three mode options
+	// mode options
 	mirrorToDisk := len(o.OutputDir) > 0 && o.From == ""
-	diskToMirror := len(o.ToMirror) > 0 && len(o.From) > 0
 	mirrorToMirror := len(o.ToMirror) > 0 && len(o.ConfigPath) > 0
 
-	// mirrorToDisk workflow is not supported with the oci feature
-	if o.UseOCIFeature && mirrorToDisk {
-		return fmt.Errorf("oci feature cannot be used when mirroring to local archive")
-	}
-	// diskToMirror workflow is not supported with the oci feature
-	if o.UseOCIFeature && diskToMirror {
-		return fmt.Errorf("oci feature cannot be used when publishing from a local archive to a registry")
-	}
 	// mirrorToMirror workflow using the oci feature must have at least on operator set with oci:// prefix
-	if mirrorToMirror {
-		bIsFBOCI := false
+	if mirrorToMirror || mirrorToDisk {
 		cfg, err := config.ReadConfig(o.ConfigPath)
 		if err != nil {
 			return fmt.Errorf("unable to read the configuration file provided with --config: %v", err)
 		}
+
 		for _, op := range cfg.Mirror.Operators {
 			if op.IsFBCOCI() {
-				bIsFBOCI = true
+				break
 			}
 		}
-		if o.UseOCIFeature && !bIsFBOCI {
-			return fmt.Errorf("no operator found with OCI FBC catalog prefix (oci://) in configuration file, please execute without the --use-oci-feature flag")
+
+		// check for defaultChannel
+		for _, op := range cfg.Mirror.Operators {
+			for _, pkg := range op.Packages {
+				if len(pkg.DefaultChannel) > 0 {
+					valid := false
+					for _, ch := range pkg.Channels {
+						// check that it's set in the channel stanza
+						if pkg.DefaultChannel == ch.Name {
+							valid = true
+							break
+						}
+					}
+					if !valid {
+						// if we get here it means that the channel has not been set with the same value as defaultChannel
+						return fmt.Errorf("defaultChannel has been set with '%s', please ensure that '%s' is declared in the channels section for the package '%s' in the config ", pkg.DefaultChannel, pkg.DefaultChannel, pkg.Name)
+					}
+				}
+			}
 		}
-		if !o.UseOCIFeature && bIsFBOCI {
-			return fmt.Errorf("use of OCI FBC catalogs (prefix oci://) in configuration file is authorized only with flag --use-oci-feature")
-		}
-	}
-	if !o.UseOCIFeature && len(o.OCIRegistriesConfig) > 0 {
-		return fmt.Errorf("oci-registries-config flag can only be used with the --use-oci-feature flag")
+
 	}
 
 	if o.SkipPruning {
@@ -299,7 +332,8 @@ func (o *MirrorOptions) Run(cmd *cobra.Command, f kcmdutil.Factory) (err error) 
 
 	cleanup := func() error {
 		if !o.SkipCleanup {
-			os.RemoveAll("olm_artifacts")
+			os.RemoveAll(artifactsFolderName)
+			removeTmpDirs()
 			return os.RemoveAll(filepath.Join(o.Dir, config.SourceDir))
 		}
 		return nil
@@ -441,10 +475,19 @@ func (o *MirrorOptions) mirrorMappings(cfg v1alpha2.ImageSetConfiguration, image
 			Type: srcRef.Type,
 		}
 
-		dstTIR := imagesource.TypedImageReference{
-			Ref:  dstRef.Ref,
-			Type: dstRef.Type,
+		// OCPBUGS-11922
+		dstTIR := o.processNestedPaths(&dstRef)
+		// Updating the original map - which will later be used to generate ICSP
+		images[srcRef] = image.TypedImage{
+			Category:    dstRef.Category,
+			ImageFormat: dstRef.ImageFormat,
+			TypedImageReference: image.TypedImageReference{
+				Type:       dstRef.Type,
+				Ref:        dstTIR.Ref,
+				OCIFBCPath: dstRef.OCIFBCPath,
+			},
 		}
+		// Updating mappings which will be used for mirroring the images
 		mappings = append(mappings, mirror.Mapping{
 			Source:      srcTIR,
 			Destination: dstTIR,
@@ -485,7 +528,7 @@ func (o *MirrorOptions) newMirrorImageOptions(insecure bool) (*mirror.MirrorImag
 func (o *MirrorOptions) generateResults(mapping image.TypedImageMapping, dir string) error {
 
 	mappingResultsPath := filepath.Join(dir, mappingFile)
-	if err := writeMappingFile(mappingResultsPath, mapping); err != nil {
+	if err := o.writeMappingFile(mappingResultsPath, mapping); err != nil {
 		return err
 	}
 
@@ -495,8 +538,8 @@ func (o *MirrorOptions) generateResults(mapping image.TypedImageMapping, dir str
 	generic := image.ByCategory(mapping, v1alpha2.TypeGeneric)
 	operator := image.ByCategory(mapping, v1alpha2.TypeOperatorBundle, v1alpha2.TypeOperatorRelatedImage)
 
-	getICSP := func(mapping image.TypedImageMapping, name string, builder ICSPBuilder) error {
-		icsps, err := GenerateICSP(name, namespaceICSPScope, icspSizeLimit, mapping, builder)
+	getICSP := func(mapping image.TypedImageMapping, name string, scope string, builder ICSPBuilder) error {
+		icsps, err := o.GenerateICSP(name, scope, icspSizeLimit, mapping, builder)
 		if err != nil {
 			return fmt.Errorf("error generating ICSP manifests")
 		}
@@ -531,14 +574,20 @@ func (o *MirrorOptions) generateResults(mapping image.TypedImageMapping, dir str
 		}
 	}
 
-	if err := getICSP(releases, "release", &ReleaseBuilder{}); err != nil {
+	if err := getICSP(releases, "release", namespaceICSPScope, &ReleaseBuilder{}); err != nil {
 		return err
 	}
-	if err := getICSP(generic, "generic", &GenericBuilder{}); err != nil {
+	if err := getICSP(generic, "generic", namespaceICSPScope, &GenericBuilder{}); err != nil {
 		return err
 	}
-	if err := getICSP(operator, "operator", &OperatorBuilder{}); err != nil {
-		return err
+	if o.MaxNestedPaths > 0 {
+		if err := getICSP(operator, "operator", repositoryICSPScope, &OperatorBuilder{}); err != nil {
+			return err
+		}
+	} else {
+		if err := getICSP(operator, "operator", namespaceICSPScope, &OperatorBuilder{}); err != nil {
+			return err
+		}
 	}
 
 	return WriteICSPs(dir, allICSPs)
@@ -590,7 +639,7 @@ func (o *MirrorOptions) processAssociationErrors(errs []error) error {
 	return nil
 }
 
-func writeMappingFile(mappingPath string, mapping image.TypedImageMapping) error {
+func (o *MirrorOptions) writeMappingFile(mappingPath string, mapping image.TypedImageMapping) error {
 	path := filepath.Clean(mappingPath)
 	mappingFile, err := os.Create(path)
 	if err != nil {
@@ -598,7 +647,7 @@ func writeMappingFile(mappingPath string, mapping image.TypedImageMapping) error
 	}
 	defer mappingFile.Close()
 	klog.Infof("Writing image mapping to %s", mappingPath)
-	if err := image.WriteImageMapping(mapping, mappingFile); err != nil {
+	if err := image.WriteImageMapping(o.MaxNestedPaths, mapping, mappingFile); err != nil {
 		return err
 	}
 	return mappingFile.Sync()
@@ -606,6 +655,7 @@ func writeMappingFile(mappingPath string, mapping image.TypedImageMapping) error
 
 func (o *MirrorOptions) mirrorToMirrorWrapper(ctx context.Context, cfg v1alpha2.ImageSetConfiguration, cleanup cleanupFunc) error {
 	destInsecure := o.DestPlainHTTP || o.DestSkipTLS
+	srcInsecure := o.SourcePlainHTTP || o.SourceSkipTLS
 
 	mappingPath := filepath.Join(o.Dir, mappingFile)
 
@@ -628,9 +678,10 @@ func (o *MirrorOptions) mirrorToMirrorWrapper(ctx context.Context, cfg v1alpha2.
 	if err != nil {
 		return err
 	}
-	if !o.UseOCIFeature {
-		var curr v1alpha2.Metadata
-		berr := targetBackend.ReadMetadata(ctx, &curr, config.MetadataBasePath)
+
+	var curr v1alpha2.Metadata
+	berr := targetBackend.ReadMetadata(ctx, &curr, config.MetadataBasePath)
+	if !o.SkipPruning {
 		if err := o.checkSequence(meta, curr, berr); err != nil {
 			return err
 		}
@@ -652,7 +703,7 @@ func (o *MirrorOptions) mirrorToMirrorWrapper(ctx context.Context, cfg v1alpha2.
 
 	// QUESTION(jpower432): Can you specify different TLS configuration for source
 	// and destination with `oc image mirror`?
-	if err := o.mirrorMappings(cfg, mapping, destInsecure); err != nil {
+	if err := o.mirrorMappings(cfg, mapping, destInsecure || srcInsecure); err != nil {
 		return err
 	}
 
@@ -662,7 +713,7 @@ func (o *MirrorOptions) mirrorToMirrorWrapper(ctx context.Context, cfg v1alpha2.
 	}
 
 	if o.DryRun {
-		if err := writeMappingFile(mappingPath, mapping); err != nil {
+		if err := o.writeMappingFile(mappingPath, mapping); err != nil {
 			return err
 		}
 		if err := o.outputPruneImagePlan(ctx, prevAssociations, prunedAssociations); err != nil {
@@ -710,7 +761,10 @@ func (o *MirrorOptions) mirrorToMirrorWrapper(ctx context.Context, cfg v1alpha2.
 	// process Cincinnati graph data image
 	if len(cfg.Mirror.Platform.Channels) > 0 {
 		if cfg.Mirror.Platform.Graph {
-			graphRef, err := o.buildGraphImage(ctx, filepath.Join(o.Dir, config.SourceDir))
+
+			// copy signatures to Cincinnati graph data directory
+			srcSignatureDir := filepath.Join(o.Dir, config.SourceDir, config.ReleaseSignatureDir)
+			graphRef, err := o.buildGraphImage(ctx, srcSignatureDir, filepath.Join(o.Dir, config.SourceDir))
 			if err != nil {
 				return fmt.Errorf("error building cincinnati graph image: %v", err)
 			}
@@ -756,6 +810,47 @@ func (o *MirrorOptions) mirrorToDiskWrapper(ctx context.Context, cfg v1alpha2.Im
 		return err
 	}
 
+	// Fix OCPBUGS-2633:
+	// For DiskToMirror only
+	// if more than one image in imageList belong to the same repository with different digests, no tag
+	// and type destinationFile, then, replace the `latest` tag (set by `DockerClientDefaults`) by a subset
+	// of the digest
+	// Ex:
+	// - name: quay.io/okd/scos-content@sha256:fc37fb091804ce32411d04559a4b0ba63139bd12b51f7d87dc2e8fa9ff9d3ef7
+	// - name: quay.io/okd/scos-content@sha256:df80aa07467d1c6f59a39f3c00e00e130a6b25308b1419264565ca7cd8a76407
+
+	firstTagLatestImageByRepo := make(map[string]image.TypedImage)
+
+	for srcRef, dstRef := range mapping {
+
+		if dstRef.Ref.Tag == tagLatest {
+			if firstSrcRef, ok := firstTagLatestImageByRepo[srcRef.Ref.AsRepository().String()]; !ok {
+				firstTagLatestImageByRepo[srcRef.Ref.AsRepository().String()] = srcRef
+			} else {
+				// There's more than one image for this repository with tag latest
+				// Replace tag latest for firstDstRef by a subset of the digest
+				if firstDstRef, exists := mapping[firstSrcRef]; exists && firstSrcRef.Ref.ID != "" && firstDstRef.Type == imagesource.DestinationFile {
+					firstDstRefTag := strings.TrimPrefix(firstSrcRef.Ref.ID, "sha256:")
+					if len(firstDstRefTag) >= 8 {
+						firstDstRefTag = firstDstRefTag[:8]
+					}
+					firstDstRef.Ref.Tag = firstDstRefTag
+					mapping[firstSrcRef] = firstDstRef
+				}
+				// all following images with latest tag will get a subset of the digest as the tag as well
+				if dstRef.Type == imagesource.DestinationFile && srcRef.Ref.ID != "" {
+					newTag := strings.TrimPrefix(srcRef.Ref.ID, "sha256:")
+					if len(newTag) >= 8 {
+						newTag = newTag[:8]
+					}
+					dstRef.Ref.Tag = newTag
+					mapping[srcRef] = dstRef
+				}
+
+			}
+		}
+	}
+	// End Fix OCPBUGS-2633
 	prunedAssociations, err := o.removePreviouslyMirrored(mapping, meta)
 	if err != nil {
 		if errors.Is(err, ErrNoUpdatesExist) {
@@ -771,7 +866,7 @@ func (o *MirrorOptions) mirrorToDiskWrapper(ctx context.Context, cfg v1alpha2.Im
 
 	mappingPath := filepath.Join(o.Dir, mappingFile)
 	if o.DryRun {
-		if err := writeMappingFile(mappingPath, mapping); err != nil {
+		if err := o.writeMappingFile(mappingPath, mapping); err != nil {
 			return err
 		}
 		return cleanup()
@@ -813,8 +908,16 @@ func (o *MirrorOptions) diskToMirrorWrapper(ctx context.Context, cleanup cleanup
 	// Publish from disk to registry
 	// this takes care of syncing the metadata to the
 	// registry backends.
+
 	mapping, err := o.Publish(ctx)
 	if err != nil {
+		// OCPBUGS-4959 for automation processes to end gracefully
+		// when we have the same sequence - i.e nothing to do
+		msqErr := &ErrMirrorSequence{}
+		if errors.As(err, &msqErr) {
+			klog.Info("No diff from previous mirror (sequence is the same), nothing to do")
+			return cleanup()
+		}
 		serr := &ErrInvalidSequence{}
 		if errors.As(err, &serr) {
 			return fmt.Errorf("error during publishing, expecting imageset with prefix mirror_seq%d: %v", serr.wantSeq, err)
@@ -824,7 +927,7 @@ func (o *MirrorOptions) diskToMirrorWrapper(ctx context.Context, cleanup cleanup
 
 	mappingPath := filepath.Join(o.Dir, mappingFile)
 	if o.DryRun {
-		if err := writeMappingFile(mappingPath, mapping); err != nil {
+		if err := o.writeMappingFile(mappingPath, mapping); err != nil {
 			return err
 		}
 		return cleanup()
@@ -834,4 +937,47 @@ func (o *MirrorOptions) diskToMirrorWrapper(ctx context.Context, cleanup cleanup
 		return err
 	}
 	return nil
+}
+
+func (o *MirrorOptions) processNestedPaths(ref *image.TypedImage) imagesource.TypedImageReference {
+
+	if o.MaxNestedPaths > 0 {
+		dir := ref.Ref
+		full := dir.RepositoryName()
+
+		pathComponents := strings.Split(full, "/")
+		if o.MaxNestedPaths > 0 && len(pathComponents) > o.MaxNestedPaths {
+			lastPathComponent := strings.Join(pathComponents[o.MaxNestedPaths-1:], "-")
+			newPathComponents := pathComponents[:o.MaxNestedPaths-1]
+			newRef := dir // reinitializing newRef from dir (so that we don't loose id and tag)
+			newRef.Namespace = strings.Join(newPathComponents, "/")
+			newRef.Name = lastPathComponent
+			return imagesource.TypedImageReference{Ref: newRef, Type: ref.Type}
+		} else {
+			// return original - no changes
+			return imagesource.TypedImageReference{Ref: ref.Ref, Type: ref.Type}
+		}
+	}
+	// return original - no changes
+	return imagesource.TypedImageReference{Ref: ref.Ref, Type: ref.Type}
+}
+
+// removeTmpDirs - utility function to delete left over temporary files
+func removeTmpDirs() {
+	const directory string = "/tmp/"
+	var toDelete = []string{"render-unpack-*", "imageset-catalog-*"}
+
+	for _, x := range toDelete {
+		// instead of traversing through all the directories in /tmp
+		// look for a spepcific name + wildcard
+		name, err := filepath.Glob(filepath.Join(directory, x))
+		if err != nil {
+			klog.Warningf("finding directory %s %v", x, err)
+		}
+		// could be more than one directory
+		for _, y := range name {
+			klog.Infof("deleting directory %s", y)
+			os.RemoveAll(y)
+		}
+	}
 }

@@ -17,4 +17,3 @@ mirror:
     #local:
     #  - name: podinfo-local
     #    path: /home/user/podinfo-6.0.0.tgz
-        

@@ -22,8 +22,8 @@ MIRROR_OCI_DIR="${DATA_TMP}/mirror_oci"
 OCI_CTLG_PATH="oc-mirror-dev.tgz"
 WORKSPACE="oc-mirror-workspace"
 CATALOGREGISTRY="quay.io"
-CATALOGORG="redhatgov"
-CATALOGNAMESPACE="redhatgov/oc-mirror-dev"
+CATALOGORG="skhoury"
+CATALOGNAMESPACE="skhoury/oc-mirror-dev"
 REGISTRY_CONN_PORT=5000
 REGISTRY_DISCONN_PORT=5001
 METADATA_REGISTRY="localhost.localdomain:$REGISTRY_CONN_PORT"
@@ -32,8 +32,12 @@ METADATA_OCI_CATALOG="oci://${DIR}/artifacts/rhop-ctlg-oci"
 TARGET_CATALOG_NAME="target-name"
 TARGET_CATALOG_TAG="target-tag"
 
-
 GOBIN=$HOME/go/bin
+# Check if this is running with a different location
+if [ ! -d $GOBIN ]
+then 
+    GOBIN=/usr/local/go/bin/
+fi
 PATH=$PATH:$GOBIN
 
 mkdir -p $DATA_TMP

@@ -10,8 +10,11 @@ include $(addprefix ./vendor/github.com/openshift/build-machinery-go/make/, \
 	targets/openshift/images.mk \
 	targets/openshift/deps-gomod.mk \
 )
-
+#v2 workspace required change
+#GO_MOD_FLAGS = -mod=readonly
 GO_BUILD_PACKAGES := ./cmd/...
+#v2 workspace required change
+#GO_PACKAGE = github.com/openshift/oc-mirror
 
 LIBDM_BUILD_TAG = $(shell hack/libdm_tag.sh)
 LIBSUBID_BUILD_TAG = $(shell hack/libsubid_tag.sh)
@@ -31,7 +34,19 @@ cross-build-linux-amd64:
 	+@GOOS=linux GOARCH=amd64 $(MAKE) "$(GO_BUILD_FLAGS)" --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/linux-amd64
 .PHONY: cross-build-linux-amd64
 
-cross-build: cross-build-linux-amd64
+cross-build-linux-ppc64le:
+	+@GOOS=linux GOARCH=ppc64le $(MAKE) "$(GO_BUILD_FLAGS)" --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/linux-ppc64le
+.PHONY: cross-build-linux-ppc64le
+
+cross-build-linux-s390x:
+	+@GOOS=linux GOARCH=s390x $(MAKE) "$(GO_BUILD_FLAGS)" --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/linux-s390x
+.PHONY: cross-build-linux-s390x
+
+cross-build-linux-arm64:
+	+@GOOS=linux GOARCH=arm64 $(MAKE) "$(GO_BUILD_FLAGS)" --no-print-directory build GO_BUILD_BINDIR=$(GO_BUILD_BINDIR)/linux-arm64
+.PHONY: cross-build-linux-arm64
+
+cross-build: cross-build-linux-amd64 cross-build-linux-ppc64le cross-build-linux-s390x cross-build-linux-arm64
 .PHONY: cross-build
 
 hack-build: clean
@@ -50,8 +65,15 @@ clean:
 .PHONY: clean
 
 test-unit:
+#v2 workspace required change
+#$(GO) test $(GO_MOD_FLAGS) $(GO_BUILD_FLAGS) -coverprofile=coverage.out -race -count=1 ./pkg/... 
 	$(GO) test $(GO_BUILD_FLAGS) -coverprofile=coverage.out -race -count=1 ./pkg/...
+	mkdir -p v2/tests/results
+	@cd v2 && $(GO) test $(GO_BUILD_FLAGS) -coverprofile=tests/results/cover.out -race -count=1 ./pkg/...
 .PHONY: test-unit
+
+v2cover:
+	go tool cover -html=v2/tests/results/cover.out -o v2/tests/results/cover.html
 
 test-e2e: build
 	./test/e2e/e2e-simple.sh ./$(GO_BUILD_BINDIR)/oc-mirror
@@ -71,12 +93,24 @@ publish-catalog:
 	@cd test/operator && make
 .PHONY: publish-catalog
 
-format: 
+format:
+#v2 workspace required change
+#$(GO) fmt $(GO_MOD_FLAGS) ./pkg/...
+#$(GO) fmt $(GO_MOD_FLAGS) ./cmd/...
 	$(GO) fmt ./pkg/...
 	$(GO) fmt ./cmd/...
 .PHONY: format
 
-vet: 
-	$(GO) vet $(GO_BUILD_FLAGS) ./pkg/... 
-	$(GO) vet $(GO_BUILD_FLAGS) ./cmd/...  
+vet:
+#v2 workspace required change
+#$(GO) vet $(GO_MOD_FLAGS) $(GO_BUILD_FLAGS) ./pkg/...
+#$(GO) vet $(GO_MOD_FLAGS) $(GO_BUILD_FLAGS) ./cmd/...
+	$(GO) vet $(GO_BUILD_FLAGS) ./pkg/...
+	$(GO) vet $(GO_BUILD_FLAGS) ./cmd/...
 .PHONY: vet
+
+#v2 workspace required change
+# build: 
+# 	mkdir -p $(GO_BUILD_BINDIR)
+# 	go build $(GO_MOD_FLAGS) $(GO_BUILD_FLAGS) $(GO_LD_FLAGS) -o $(GO_BUILD_BINDIR) ./...
+# .PHONY: build
