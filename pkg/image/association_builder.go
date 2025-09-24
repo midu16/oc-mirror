@@ -9,13 +9,12 @@ import (
 	"path/filepath"
 
 	ctrsimgmanifest "github.com/containers/image/v5/manifest"
-	"github.com/docker/distribution"
-	"github.com/docker/distribution/manifest/manifestlist"
-	"github.com/docker/distribution/manifest/schema2"
+	"github.com/distribution/distribution/v3"
+	"github.com/distribution/distribution/v3/manifest/manifestlist"
+	"github.com/distribution/distribution/v3/manifest/schema2"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openshift/oc/pkg/cli/image/imagesource"
-	"github.com/operator-framework/operator-registry/pkg/image/containerdregistry"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
 	"github.com/openshift/oc-mirror/pkg/api/v1alpha2"
@@ -208,12 +207,7 @@ func AssociateRemoteImageLayers(ctx context.Context, imgMappings TypedImageMappi
 		seen := bundleAssociations.SetContainsKey(ref)
 		return seen
 	}
-
-	resolver, err := containerdregistry.NewResolver("", skipTlS, plainHTTP, nil)
-	if err != nil {
-		err = fmt.Errorf("error creating image resolver: %v", err)
-		return bundleAssociations, utilerrors.NewAggregate([]error{err})
-	}
+	sysContext := NewSystemContext(skipTlS && plainHTTP, "")
 
 	regctx, err := NewContext(skipVerification)
 	if err != nil {
@@ -232,7 +226,7 @@ func AssociateRemoteImageLayers(ctx context.Context, imgMappings TypedImageMappi
 				errs = append(errs, &ErrInvalidComponent{srcImg.String(), srcImg.Ref.Tag})
 				continue
 			}
-			imgWithID, err := ResolveToPin(ctx, resolver, srcImg.Ref.Exact())
+			imgWithID, err := ResolveToPin(ctx, sysContext, srcImg.Ref.Exact())
 			if err != nil {
 				errs = append(errs, &ErrInvalidImage{srcImg.String(), err})
 				continue

@@ -344,7 +344,7 @@ func (o *MirrorOptions) processCustomImages(ctx context.Context, dir string, fil
 	}
 
 	if found {
-		ctlgRefs, err := o.rebuildCatalogs(ctx, dir)
+		ctlgRefs, err := o.rebuildOrCopyCatalogs(ctx, dir)
 		if err != nil {
 			return allMappings, fmt.Errorf("error rebuilding catalog images from file-based catalogs: %v", err)
 		}
@@ -465,7 +465,7 @@ func unpack(archiveFilePath, dest string, filesInArchive map[string]string) erro
 		if archiveFilePath == config.CatalogsDir {
 			err := unarchive(archivePath, dest)
 			if err != nil {
-				klog.V(2).Info("unarchive failed with the error: %s", err.Error())
+				klog.V(2).Infof("unarchive failed with the error: %s", err.Error())
 				return err
 			}
 		} else {

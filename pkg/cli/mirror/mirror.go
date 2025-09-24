@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	imagecopy "github.com/containers/image/v5/copy"
+	"github.com/containers/image/v5/signature"
 	"github.com/containers/image/v5/types"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -35,10 +37,6 @@ import (
 	"github.com/openshift/oc-mirror/pkg/image"
 	"github.com/openshift/oc-mirror/pkg/metadata"
 	"github.com/openshift/oc-mirror/pkg/metadata/storage"
-
-	cliV2 "github.com/openshift/oc-mirror/v2/pkg/cli"
-	clog "github.com/openshift/oc-mirror/v2/pkg/log"
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -81,22 +79,16 @@ var (
 )
 
 const (
-	tagLatest string = "latest"
+	tagLatest    string = "latest"
+	BrightYellow string = "\033[93m"
+	DefaultColor string = "\033[0m"
 )
 
 func NewMirrorCmd() *cobra.Command {
-	if isV2() {
-		return buildV2Cmd()
-	} else {
-		return buildV1Cmd()
-	}
-}
+	klog.Warningln("⚠️  oc-mirror v1 is deprecated (started in 4.18 release) and will be removed in a future release - please migrate to oc-mirror --v2")
+	klog.Warningln(BrightYellow + "⚠️  starting with oc-mirror 4.21, the use of the flag --v1 or --v2 is mandatory, please use --v2 to use the supported oc-mirror version or --v1 to continue using the oc-mirror deprecated version" + DefaultColor)
+	klog.Warningln(BrightYellow + "⚠️  the sub-commands list, describe and init are only implemented in oc-mirror v1, so please use --v1 for these sub-commands until some replacement is provided\n" + DefaultColor)
 
-func isV2() bool {
-	return len(os.Args) > 0 && slices.Contains(os.Args[:], "--v2")
-}
-
-func buildV1Cmd() *cobra.Command {
 	o := MirrorOptions{
 		operatorCatalogToFullArtifactPath: map[string]string{},
 	}
@@ -144,16 +136,7 @@ func buildV1Cmd() *cobra.Command {
 	return cmd
 }
 
-func buildV2Cmd() *cobra.Command {
-	fmt.Println("--v2 flag identified, flow redirected to the oc-mirror v2 version. PLEASE DO NOT USE that. V2 is still under development and it is not ready to be used. ")
-
-	log := clog.New("info")
-	cmd := cliV2.NewMirrorCmd(log)
-	return cmd
-}
-
 func (o *MirrorOptions) Complete(cmd *cobra.Command, args []string) error {
-
 	destination := args[0]
 	splitIdx := strings.Index(destination, "://")
 	if splitIdx == -1 {
@@ -283,13 +266,10 @@ func (o *MirrorOptions) Validate() error {
 	if mirrorToMirror || mirrorToDisk {
 		cfg, err := config.ReadConfig(o.ConfigPath)
 		if err != nil {
-			return fmt.Errorf("unable to read the configuration file provided with --config: %v", err)
-		}
-
-		for _, op := range cfg.Mirror.Operators {
-			if op.IsFBCOCI() {
-				break
+			if strings.Contains(err.Error(), "config GVK not recognized") && o.LogLevel == 2 {
+				return fmt.Errorf("detected a v2 ImageSetConfiguration, please use --v2 instead of -v2")
 			}
+			return fmt.Errorf("unable to read the configuration file provided with --config: %v", err)
 		}
 
 		// check for defaultChannel
@@ -343,8 +323,10 @@ func (o *MirrorOptions) Run(cmd *cobra.Command, f kcmdutil.Factory) (err error) 
 }
 
 func (o *MirrorOptions) mirrorImages(ctx context.Context, cleanup cleanupFunc) error {
-
 	o.remoteRegFuncs = RemoteRegFuncs{
+		copy: func(ctx context.Context, policyContext *signature.PolicyContext, destRef types.ImageReference, srcRef types.ImageReference, options *imagecopy.Options) (copiedManifest []byte, retErr error) {
+			return imagecopy.Image(ctx, policyContext, destRef, srcRef, options)
+		},
 		newImageSource: func(ctx context.Context, sys *types.SystemContext, imgRef types.ImageReference) (types.ImageSource, error) {
 			return imgRef.NewImageSource(ctx, sys)
 		},
@@ -451,7 +433,6 @@ func (o *MirrorOptions) removePreviouslyMirrored(images image.TypedImageMapping,
 
 // mirrorMappings downloads individual images from an image mapping.
 func (o *MirrorOptions) mirrorMappings(cfg v1alpha2.ImageSetConfiguration, images image.TypedImageMapping, insecure bool) error {
-
 	opts, err := o.newMirrorImageOptions(insecure)
 	if err != nil {
 		return err
@@ -526,7 +507,6 @@ func (o *MirrorOptions) newMirrorImageOptions(insecure bool) (*mirror.MirrorImag
 // generateResults will generate a mapping.txt and allow applicable manifests and write
 // the data to files in the specified directory.
 func (o *MirrorOptions) generateResults(mapping image.TypedImageMapping, dir string) error {
-
 	mappingResultsPath := filepath.Join(dir, mappingFile)
 	if err := o.writeMappingFile(mappingResultsPath, mapping); err != nil {
 		return err
@@ -597,7 +577,6 @@ func (o *MirrorOptions) generateResults(mapping image.TypedImageMapping, dir str
 // the specified results directory from the defined source directory
 // in the config package.
 func (o *MirrorOptions) moveToResults(resultsDir string) error {
-
 	resultsDir = filepath.Clean(resultsDir)
 
 	srcSignaturePath := filepath.Join(o.Dir, config.SourceDir, config.ReleaseSignatureDir)
@@ -752,7 +731,7 @@ func (o *MirrorOptions) mirrorToMirrorWrapper(ctx context.Context, cfg v1alpha2.
 	}
 	// process catalog FBC images
 	if len(cfg.Mirror.Operators) > 0 {
-		ctlgRefs, err := o.rebuildCatalogs(ctx, filepath.Join(o.Dir, config.SourceDir))
+		ctlgRefs, err := o.rebuildOrCopyCatalogs(ctx, filepath.Join(o.Dir, config.SourceDir))
 		if err != nil {
 			return fmt.Errorf("error rebuilding catalog images from file-based catalogs: %v", err)
 		}
@@ -822,7 +801,6 @@ func (o *MirrorOptions) mirrorToDiskWrapper(ctx context.Context, cfg v1alpha2.Im
 	firstTagLatestImageByRepo := make(map[string]image.TypedImage)
 
 	for srcRef, dstRef := range mapping {
-
 		if dstRef.Ref.Tag == tagLatest {
 			if firstSrcRef, ok := firstTagLatestImageByRepo[srcRef.Ref.AsRepository().String()]; !ok {
 				firstTagLatestImageByRepo[srcRef.Ref.AsRepository().String()] = srcRef
@@ -940,7 +918,6 @@ func (o *MirrorOptions) diskToMirrorWrapper(ctx context.Context, cleanup cleanup
 }
 
 func (o *MirrorOptions) processNestedPaths(ref *image.TypedImage) imagesource.TypedImageReference {
-
 	if o.MaxNestedPaths > 0 {
 		dir := ref.Ref
 		full := dir.RepositoryName()
@@ -965,7 +942,7 @@ func (o *MirrorOptions) processNestedPaths(ref *image.TypedImage) imagesource.Ty
 // removeTmpDirs - utility function to delete left over temporary files
 func removeTmpDirs() {
 	const directory string = "/tmp/"
-	var toDelete = []string{"render-unpack-*", "imageset-catalog-*"}
+	toDelete := []string{"render-unpack-*", "imageset-catalog-*"}
 
 	for _, x := range toDelete {
 		// instead of traversing through all the directories in /tmp
