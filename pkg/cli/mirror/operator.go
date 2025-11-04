@@ -990,8 +990,7 @@ func (o *OperatorOptions) writeConfigs(dc *declcfg.DeclarativeConfig, ic v1alpha
 
 	indexFile, err := os.Create(catalogIndexPath)
 	if err != nil {
-		// return "", fmt.Errorf("error creating diff index file: %v", err)
-		return indexDir, nil
+		return "", fmt.Errorf("error creating diff index file: %v", err)
 	}
 
 	// includeConfigPath looks like <some path>/src/catalogs/<repoPath>/include-config.gob
