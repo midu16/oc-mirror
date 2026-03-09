@@ -6,12 +6,14 @@ import (
 	"os"
 	"testing"
 
+	gcrv1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"go.podman.io/image/v5/types"
 
+	"github.com/openshift/oc-mirror/v2/internal/pkg/consts"
+
 	"github.com/openshift/oc-mirror/v2/internal/pkg/api/v2alpha1"
-	"github.com/openshift/oc-mirror/v2/internal/pkg/common"
 	clog "github.com/openshift/oc-mirror/v2/internal/pkg/log"
 	mirror "github.com/openshift/oc-mirror/v2/internal/pkg/mirror"
 )
@@ -29,8 +31,8 @@ func TestAllDeleteImages(t *testing.T) {
 	global := &mirror.GlobalOptions{
 		SecurePolicy:      false,
 		Quiet:             false,
-		WorkingDir:        common.TestFolder,
-		DeleteDestination: "docker://localhost:5000/myregistry",
+		WorkingDir:        consts.TestFolder,
+		DeleteDestination: consts.DockerProtocol + "localhost:5000/myregistry",
 	}
 
 	_, sharedOpts := mirror.SharedImageFlags()
@@ -45,7 +47,7 @@ func TestAllDeleteImages(t *testing.T) {
 		SrcImage:            srcOpts,
 		DestImage:           destOpts,
 		RetryOpts:           retryOpts,
-		Destination:         "docker://myregistry",
+		Destination:         consts.DockerProtocol + "myregistry",
 		Dev:                 false,
 		Mode:                mirror.MirrorToDisk,
 		LocalStorageFQDN:    "localhost:8888",
@@ -74,16 +76,16 @@ func TestAllDeleteImages(t *testing.T) {
 	di := New(log, opts, &mockBatch{}, &mockBlobs{}, isc, &mockManifest{}, "/tmp", &mockSignatureHandler{})
 
 	t.Run("Testing ReadDeleteData : should pass", func(t *testing.T) {
-		opts.Global.WorkingDir = common.TestFolder
+		opts.Global.WorkingDir = consts.TestFolder
 		data, err := di.ReadDeleteMetaData()
 		if err != nil {
 			t.Fatal("should not fail")
 		}
-		assert.Equal(t, "docker://localhost:5000/myregistry/openshift/release:4.15.12-x86_64-agent-installer-api-server", data.Items[0].ImageReference)
+		assert.Equal(t, consts.DockerProtocol+"localhost:5000/myregistry/openshift/release:4.15.12-x86_64-agent-installer-api-server", data.Items[0].ImageReference)
 	})
 
 	t.Run("Testing DeleteRegistryImages : should pass", func(t *testing.T) {
-		opts.Global.WorkingDir = common.TestFolder
+		opts.Global.WorkingDir = consts.TestFolder
 		imgs, err := di.ReadDeleteMetaData()
 		if err != nil {
 			t.Fatal("should not fail")
@@ -97,7 +99,7 @@ func TestAllDeleteImages(t *testing.T) {
 	t.Run("Testing DeleteCacheBlobs : should pass", func(t *testing.T) {
 		testFolder := t.TempDir()
 		defer os.RemoveAll(testFolder)
-		opts.Global.WorkingDir = common.TestFolder
+		opts.Global.WorkingDir = consts.TestFolder
 		opts.Global.ForceCacheDelete = true
 		deleteDI := New(log, opts, &mockBatch{}, &mockBlobs{}, v2alpha1.ImageSetConfiguration{}, &mockManifest{}, "/tmp", &mockSignatureHandler{})
 		imgs, err := di.ReadDeleteMetaData()
@@ -149,8 +151,8 @@ func TestWriteMetaData(t *testing.T) {
 	t.Run("Testing ReadDeleteData : should pass", func(t *testing.T) {
 		cpImages := []v2alpha1.CopyImageSchema{
 			{
-				Source:      "docker://localhost:55000/openshift-release-dev/ocp-v4.0-art-dev@sha256:c4b775cbe8eec55de2c163919c6008599e2aebe789ed93ada9a307e800e3f1e2",
-				Destination: "docker://localhost:55000/openshift-release-dev/ocp-v4.0-art-dev@sha256:c4b775cbe8eec55de2c163919c6008599e2aebe789ed93ada9a307e800e3f1e2",
+				Source:      consts.DockerProtocol + "localhost:55000/openshift-release-dev/ocp-v4.0-art-dev@sha256:c4b775cbe8eec55de2c163919c6008599e2aebe789ed93ada9a307e800e3f1e2",
+				Destination: consts.DockerProtocol + "localhost:55000/openshift-release-dev/ocp-v4.0-art-dev@sha256:c4b775cbe8eec55de2c163919c6008599e2aebe789ed93ada9a307e800e3f1e2",
 				Origin:      "test",
 			},
 		}
@@ -214,7 +216,7 @@ func TestSigDeleteItems(t *testing.T) {
 			expected: []v2alpha1.DeleteItem{
 				{
 					ImageName:      "registry.example.com/ns/img:sha256-c8636a92b5665988f030ed0948225276fea7428f2fe1f227142c988dc409a515.sig",
-					ImageReference: "docker://mirror.example.com/ns/img:sha256-c8636a92b5665988f030ed0948225276fea7428f2fe1f227142c988dc409a515.sig",
+					ImageReference: consts.DockerProtocol + "mirror.example.com/ns/img:sha256-c8636a92b5665988f030ed0948225276fea7428f2fe1f227142c988dc409a515.sig",
 					Type:           v2alpha1.TypeGeneric,
 				},
 			},
@@ -248,7 +250,7 @@ func TestGetSignatureTagWithoutCache(t *testing.T) {
 			},
 			expected: &v2alpha1.DeleteItem{
 				ImageName:      "registry.example.com/ns/img:sha256-c8636a92b5665988f030ed0948225276fea7428f2fe1f227142c988dc409a515.sig",
-				ImageReference: "docker://mirror.example.com/ns/img:sha256-c8636a92b5665988f030ed0948225276fea7428f2fe1f227142c988dc409a515.sig",
+				ImageReference: consts.DockerProtocol + "mirror.example.com/ns/img:sha256-c8636a92b5665988f030ed0948225276fea7428f2fe1f227142c988dc409a515.sig",
 				Type:           v2alpha1.TypeGeneric,
 			},
 		},
@@ -298,7 +300,7 @@ func TestSigDeleteItem(t *testing.T) {
 			sig: "sha256-abc123.sig",
 			expected: &v2alpha1.DeleteItem{
 				ImageName:      "registry.example.com/ns/img:sha256-abc123.sig",
-				ImageReference: "docker://mirror.example.com/ns/img:sha256-abc123.sig",
+				ImageReference: consts.DockerProtocol + "mirror.example.com/ns/img:sha256-abc123.sig",
 				Type:           v2alpha1.TypeGeneric,
 			},
 		},
@@ -319,6 +321,182 @@ func TestSigDeleteItem(t *testing.T) {
 			d := DeleteImages{}
 			item := d.sigDeleteItem(tt.img, tt.sig)
 			assert.Equal(t, tt.expected, item)
+		})
+	}
+}
+
+// TestDeleteImagesWithTargetRepoAndTag tests deletion of images that use targetRepo and targetTag
+func TestDeleteImagesWithTargetRepoAndTag(t *testing.T) {
+	log := clog.New("trace")
+
+	tempDir := t.TempDir()
+
+	global := &mirror.GlobalOptions{
+		SecurePolicy:      false,
+		Quiet:             false,
+		WorkingDir:        tempDir,
+		DeleteDestination: "docker://localhost:5000/myregistry",
+	}
+
+	_, sharedOpts := mirror.SharedImageFlags()
+	_, deprecatedTLSVerifyOpt := mirror.DeprecatedTLSVerifyFlags()
+	_, srcOpts := mirror.ImageSrcFlags(global, sharedOpts, deprecatedTLSVerifyOpt, "src-", "screds")
+	_, destOpts := mirror.ImageDestFlags(global, sharedOpts, deprecatedTLSVerifyOpt, "dest-", "dcreds")
+	_, retryOpts := mirror.RetryFlags()
+
+	opts := mirror.CopyOptions{
+		Global:              global,
+		DeprecatedTLSVerify: deprecatedTLSVerifyOpt,
+		SrcImage:            srcOpts,
+		DestImage:           destOpts,
+		RetryOpts:           retryOpts,
+		Destination:         "docker://myregistry",
+		Dev:                 false,
+		Mode:                mirror.MirrorToDisk,
+		LocalStorageFQDN:    "localhost:8888",
+	}
+
+	cfg := v2alpha1.ImageSetConfiguration{}
+	di := New(log, opts, &mockBatch{}, &mockBlobs{}, cfg, &mockManifest{}, "/tmp", &mockSignatureHandler{})
+
+	writeMetadataTests := []struct {
+		name              string
+		cpImages          []v2alpha1.CopyImageSchema
+		expectedImageRef  string
+		expectedOrigin    string
+		expectedItemCount int
+	}{
+		{
+			name: "with targetRepo",
+			cpImages: []v2alpha1.CopyImageSchema{
+				{
+					Source:      "docker://registry.redhat.io/ubi8/ubi:latest",
+					Destination: "docker://localhost:5000/myregistry/custom-namespace/custom-image:latest",
+					Origin:      "registry.redhat.io/ubi8/ubi:latest",
+					Type:        v2alpha1.TypeGeneric,
+				},
+			},
+			expectedImageRef:  "docker://localhost:5000/myregistry/custom-namespace/custom-image:latest",
+			expectedOrigin:    "registry.redhat.io/ubi8/ubi:latest",
+			expectedItemCount: 1,
+		},
+		{
+			name: "with targetTag",
+			cpImages: []v2alpha1.CopyImageSchema{
+				{
+					Source:      "docker://registry.redhat.io/ubi8/ubi:latest",
+					Destination: "docker://localhost:5000/myregistry/ubi8/ubi:v1.0",
+					Origin:      "registry.redhat.io/ubi8/ubi:latest",
+					Type:        v2alpha1.TypeGeneric,
+				},
+			},
+			expectedImageRef:  "docker://localhost:5000/myregistry/ubi8/ubi:v1.0",
+			expectedOrigin:    "registry.redhat.io/ubi8/ubi:latest",
+			expectedItemCount: 1,
+		},
+		{
+			name: "with both targetRepo and targetTag",
+			cpImages: []v2alpha1.CopyImageSchema{
+				{
+					Source:      "docker://registry.redhat.io/ubi8/ubi:latest",
+					Destination: "docker://localhost:5000/myregistry/custom-namespace/custom-image:v2.0",
+					Origin:      "registry.redhat.io/ubi8/ubi:latest",
+					Type:        v2alpha1.TypeGeneric,
+				},
+			},
+			expectedImageRef:  "docker://localhost:5000/myregistry/custom-namespace/custom-image:v2.0",
+			expectedOrigin:    "registry.redhat.io/ubi8/ubi:latest",
+			expectedItemCount: 1,
+		},
+		{
+			name: "with targetTag for digest-only image",
+			cpImages: []v2alpha1.CopyImageSchema{
+				{
+					Source:      "docker://sometest.registry.com/testns/test@sha256:f30638f60452062aba36a26ee6c036feead2f03b28f2c47f2b0a991e41baebea",
+					Destination: "docker://localhost:5000/myregistry/testns/test:v1.0",
+					Origin:      "sometest.registry.com/testns/test@sha256:f30638f60452062aba36a26ee6c036feead2f03b28f2c47f2b0a991e41baebea",
+					Type:        v2alpha1.TypeGeneric,
+				},
+			},
+			expectedImageRef:  "docker://localhost:5000/myregistry/testns/test:v1.0",
+			expectedOrigin:    "sometest.registry.com/testns/test@sha256:f30638f60452062aba36a26ee6c036feead2f03b28f2c47f2b0a991e41baebea",
+			expectedItemCount: 1,
+		},
+		{
+			name: "same origin with different targets should not be deduped",
+			cpImages: []v2alpha1.CopyImageSchema{
+				{
+					Source:      "docker://registry.redhat.io/ubi8/ubi:latest",
+					Destination: "docker://localhost:5000/myregistry/repo-a/ubi:latest",
+					Origin:      "registry.redhat.io/ubi8/ubi:latest",
+					Type:        v2alpha1.TypeGeneric,
+				},
+				{
+					Source:      "docker://registry.redhat.io/ubi8/ubi:latest",
+					Destination: "docker://localhost:5000/myregistry/repo-b/ubi:latest",
+					Origin:      "registry.redhat.io/ubi8/ubi:latest",
+					Type:        v2alpha1.TypeGeneric,
+				},
+			},
+			expectedItemCount: 2,
+		},
+	}
+
+	for _, tt := range writeMetadataTests {
+		t.Run("WriteDeleteMetaData "+tt.name, func(t *testing.T) {
+			err := di.WriteDeleteMetaData(context.Background(), tt.cpImages)
+			assert.NoError(t, err)
+
+			data, err := di.ReadDeleteMetaData()
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedItemCount, len(data.Items))
+			if tt.expectedItemCount == 1 {
+				assert.Equal(t, tt.expectedImageRef, data.Items[0].ImageReference)
+				assert.Equal(t, tt.expectedOrigin, data.Items[0].ImageName)
+			}
+		})
+	}
+
+	deleteRegistryTests := []struct {
+		name      string
+		imageName string
+		imageRef  string
+	}{
+		{
+			name:      "with targetRepo",
+			imageName: "registry.redhat.io/ubi8/ubi:latest",
+			imageRef:  "docker://localhost:5000/myregistry/custom-namespace/custom-image:latest",
+		},
+		{
+			name:      "with targetTag",
+			imageName: "registry.redhat.io/ubi8/ubi:latest",
+			imageRef:  "docker://localhost:5000/myregistry/ubi8/ubi:v1.0",
+		},
+		{
+			name:      "with both targetRepo and targetTag",
+			imageName: "registry.redhat.io/ubi8/ubi:latest",
+			imageRef:  "docker://localhost:5000/myregistry/custom-namespace/custom-image:v2.0",
+		},
+		{
+			name:      "with targetTag for digest-only image",
+			imageName: "sometest.registry.com/testns/test@sha256:f30638f60452062aba36a26ee6c036feead2f03b28f2c47f2b0a991e41baebea",
+			imageRef:  "docker://localhost:5000/myregistry/testns/test:v1.0",
+		},
+	}
+
+	for _, tt := range deleteRegistryTests {
+		t.Run("DeleteRegistryImages "+tt.name, func(t *testing.T) {
+			deleteImageList := v2alpha1.DeleteImageList{
+				Items: []v2alpha1.DeleteItem{
+					{
+						ImageName:      tt.imageName,
+						ImageReference: tt.imageRef,
+						Type:           v2alpha1.TypeGeneric,
+					},
+				},
+			}
+			err := di.DeleteRegistryImages(deleteImageList)
+			assert.NoError(t, err)
 		})
 	}
 }
@@ -368,7 +546,7 @@ func (o mockManifest) GetOperatorConfig(file string) (*v2alpha1.OperatorConfigSc
 	return &v2alpha1.OperatorConfigSchema{}, nil
 }
 
-func (o mockManifest) ExtractOCILayers(filePath, toPath, label string, oci *v2alpha1.OCISchema) error {
+func (o mockManifest) ExtractOCILayers(_ gcrv1.Image, toPath, label string) error {
 	return nil
 }
 
@@ -386,4 +564,8 @@ func (o mockManifest) ImageDigest(ctx context.Context, sourceCtx *types.SystemCo
 
 func (o mockManifest) ImageManifest(ctx context.Context, sourceCtx *types.SystemContext, imgRef string, instanceDigest *digest.Digest) ([]byte, string, error) {
 	return nil, "", nil
+}
+
+func (o mockManifest) GetOCIImageFromIndex(dir string) (gcrv1.Image, error) { //nolint:ireturn // as expected by go-containerregistry
+	return nil, nil
 }

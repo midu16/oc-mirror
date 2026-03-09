@@ -152,7 +152,7 @@ mirror:
       --policy string                  Path to a trust policy file
   -p, --port uint16                    HTTP port used by oc-mirror's local storage instance (default 55000)
       --registries.d DIR               use registry configuration files in DIR (e.g. for container signature storage)
-      --remove-signatures              Do not copy image signature (default true)
+      --remove-signatures              Do not copy image signature (default false)
       --retry-delay duration           delay between 2 retries (default 1s)
       --retry-times int                the number of times to possibly retry (default 2)
       --rootless-storage-path string   Override the default container rootless storage path (usually in etc/containers/storage.conf)
@@ -240,6 +240,12 @@ The `delete` sub-command has its own set of flags:
 
 ### Other Features
 * [Enclave support](v2/docs/features/enclave_support.md)
+
+#### Catalog Pinning
+
+When running mirror-to-disk or mirror-to-mirror workflows, oc-mirror automatically generates pinned configuration files where operator catalogs are referenced by SHA256 digests instead of tags. This ensures reproducible mirroring operations since digest references always point to the exact same image content, while tag-based references can change over time.
+
+Two files are generated in the working directory: `isc_pinned_{timestamp}.yaml` contains a pinned ImageSetConfiguration with catalogs referenced by digest, and `disc_pinned_{timestamp}.yaml` contains a corresponding DeleteImageSetConfiguration. The pinned ISC can be used for reproducible mirrors of the exact same content, while the pinned DISC can be used later with the delete sub-command to remove precisely what was mirrored.
 
 ## Testing
 It is possible to run in this module unit tests.

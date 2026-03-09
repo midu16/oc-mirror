@@ -17,6 +17,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/otiai10/copy"
 
+	"github.com/openshift/oc-mirror/v2/internal/pkg/consts"
+
 	"github.com/openshift/oc-mirror/v2/internal/pkg/api/v2alpha1"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/image"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/log"
@@ -33,7 +35,6 @@ const (
 	operatorCatalogFilteredImageDir = "filtered-catalog-image"
 	operatorCatalogImageDir         = "catalog-image"
 	operatorCatalogConfigDir        = "catalog-config"
-	dockerProtocol                  = "docker://"
 )
 
 type GCRCatalogBuilder struct {
@@ -66,7 +67,7 @@ func (c GCRCatalogBuilder) RebuildCatalog(ctx context.Context, catalogCopyRef v2
 		return fmt.Errorf("error initializing a container image for catalog %s from %s: %v", catalogCopyRef.Origin, originCatalogLayoutDir, err)
 	}
 
-	configLayerToAdd, err := LayerFromPathWithUidGid("/configs", configPath, 0, 0)
+	configLayerToAdd, err := LayerFromPathWithUidGid("configs", configPath, 0, 0)
 	if err != nil {
 		return fmt.Errorf("error creating add layer: %v", err)
 	}
@@ -74,9 +75,9 @@ func (c GCRCatalogBuilder) RebuildCatalog(ctx context.Context, catalogCopyRef v2
 
 	// Since we are defining the FBC as index.json,
 	// remove anything that may currently exist
-	deletedConfigLayer, err := deleteLayer("/.wh.configs")
+	deletedConfigLayer, err := deleteLayer(".wh.configs")
 	if err != nil {
-		return fmt.Errorf("error preparing to delete old /configs from catalog %s : %v", catalogCopyRef.Origin, err)
+		return fmt.Errorf("error preparing to delete old configs/ from catalog %s : %w", catalogCopyRef.Origin, err)
 	}
 	layersToDelete = append(layersToDelete, deletedConfigLayer)
 
@@ -111,7 +112,7 @@ func (c GCRCatalogBuilder) RebuildCatalog(ctx context.Context, catalogCopyRef v2
 	case mirror.MirrorToDisk:
 		srcCache = destRef.SetTag(filepath.Base(filteredDir)).Reference
 	case mirror.MirrorToMirror:
-		srcCache = strings.Replace(catalogCopyRef.Destination, c.CopyOpts.Destination, dockerProtocol+c.CopyOpts.LocalStorageFQDN, 1)
+		srcCache = strings.Replace(catalogCopyRef.Destination, c.CopyOpts.Destination, consts.DockerProtocol+c.CopyOpts.LocalStorageFQDN, 1)
 		destRef, err := image.ParseRef(srcCache)
 		if err != nil {
 			return err

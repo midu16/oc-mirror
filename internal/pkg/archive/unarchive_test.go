@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/openshift/oc-mirror/v2/internal/pkg/common"
-
 	"github.com/stretchr/testify/assert"
+
+	"github.com/openshift/oc-mirror/v2/internal/pkg/consts"
 )
 
 func TestUnArchiver_UnArchive(t *testing.T) {
@@ -124,7 +124,7 @@ func TestUnArchiver_CacheDirError(t *testing.T) {
 
 func prepareFakeTarWorkingDir(tarFile *os.File) error {
 	tarWriter := tar.NewWriter(tarFile)
-	workingDirFake := common.TestFolder + "working-dir-fake"
+	workingDirFake := consts.TestFolder + "working-dir-fake"
 
 	err := filepath.Walk(workingDirFake, func(path string, info os.FileInfo, incomingError error) error {
 		if incomingError != nil {
@@ -177,7 +177,7 @@ func prepareFakeTarWorkingDir(tarFile *os.File) error {
 }
 
 func prepareFakeTarCacheDir(tarFile *os.File) error {
-	cacheDirFake := common.TestFolder + "cache-fake"
+	cacheDirFake := consts.TestFolder + "cache-fake"
 	tarWriter := tar.NewWriter(tarFile)
 	err := filepath.Walk(cacheDirFake, func(path string, info os.FileInfo, incomingError error) error {
 		if incomingError != nil {
@@ -234,67 +234,4 @@ func prepareFakeTar(tarFile *os.File) error {
 	}
 	err = prepareFakeTarCacheDir(tarFile)
 	return err
-}
-
-func TestSanitizeArchivePath(t *testing.T) {
-	cases := []struct {
-		name        string
-		basedir     string
-		filepath    string
-		expected    string
-		expectedErr bool
-	}{
-		{
-			name:     "absolute path",
-			basedir:  "/workdir",
-			filepath: "path/to/file",
-			expected: "/workdir/path/to/file",
-		},
-		{
-			name:     "relative to current path",
-			basedir:  "./workdir",
-			filepath: "path/to/file",
-			expected: "workdir/path/to/file",
-		},
-		{
-			name:     "current dir as '.'",
-			basedir:  ".",
-			filepath: "path/to/file",
-			expected: "path/to/file",
-		},
-		{
-			name:     "filepath starts with '.'",
-			basedir:  ".",
-			filepath: "./path/to/file",
-			expected: "path/to/file",
-		},
-		{
-			name:     "hidden file in '.'",
-			basedir:  ".",
-			filepath: ".hidden",
-			expected: ".hidden",
-		},
-		{
-			name:     "non-tainted '..'",
-			basedir:  "/workdir",
-			filepath: "../workdir/path/to/file",
-			expected: "/workdir/path/to/file",
-		},
-		{
-			name:        "tainted '..'",
-			basedir:     ".",
-			filepath:    "../../../../../../../../../../../../etc/shadow",
-			expectedErr: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			res, err := sanitizeArchivePath(tc.basedir, tc.filepath)
-			if tc.expectedErr {
-				assert.ErrorContains(t, err, "content filepath is tainted")
-			} else if assert.NoError(t, err, res) {
-				assert.Equal(t, tc.expected, res)
-			}
-		})
-	}
 }

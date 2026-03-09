@@ -17,6 +17,8 @@ import (
 	"github.com/vbauerster/mpb/v8"
 	"go.podman.io/image/v5/types"
 
+	"github.com/openshift/oc-mirror/v2/internal/pkg/consts"
+
 	"github.com/openshift/oc-mirror/v2/internal/pkg/api/v2alpha1"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/image"
 	"github.com/openshift/oc-mirror/v2/internal/pkg/mirror"
@@ -75,7 +77,16 @@ func (o *FilterCollector) OperatorImageCollector(ctx context.Context) (v2alpha1.
 			allErrs = append(allErrs, fmt.Errorf("collect catalog %q: %w", op.Catalog, err))
 			continue
 		}
-		collectorSchema.CatalogToFBCMap[imgSpec.ReferenceWithTransport] = result
+		// CLID-513: For OCI paths with digest, use a consistent key format (without digest)
+		// This matches how catalogImage is constructed in collectOperator
+		mapKey := imgSpec.ReferenceWithTransport
+		if imgSpec.Transport == consts.OciProtocol && imgSpec.IsImageByDigestOnly() {
+			sourceOCIDir, absErr := filepath.Abs(imgSpec.Name)
+			if absErr == nil {
+				mapKey = consts.OciProtocol + sourceOCIDir
+			}
+		}
+		collectorSchema.CatalogToFBCMap[mapKey] = result
 
 		spinner.Increment()
 		if !o.Opts.Global.IsTerminal {
@@ -129,16 +140,56 @@ func createFolders(paths []string) error {
 	return errors.Join(errs...)
 }
 
-func digestOfFilter(catalog v2alpha1.Operator) (string, error) {
+// digestOfFilter computes a hash of the operator filter configuration.
+//
+// The catalogDigest parameter controls normalization behavior:
+//   - When non-empty: normalizes the catalog reference to "name@sha256:digest" form (CLID-513).
+//     This ensures consistent hashes whether catalog is specified by tag or digest in the ISC.
+//   - When empty: uses the catalog reference as-is.
+func digestOfFilter(catalog v2alpha1.Operator, catalogDigest string) (string, error) {
 	c := catalog
 	c.TargetCatalog = ""
 	c.TargetTag = ""
 	c.TargetCatalogSourceTemplate = ""
+	if c.Catalog != "" && catalogDigest != "" {
+		imgSpec, err := image.ParseRef(c.Catalog)
+		if err == nil {
+			c.Catalog = image.WithDigest(imgSpec.Name, catalogDigest)
+		}
+	}
 	pkgs, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%x", md5.Sum(pkgs))[0:32], nil
+}
+
+// findFilterDigest returns the filter digest to use, checking for an existing
+// filtered catalog on disk and falling back to the legacy digest if needed.
+func findFilterDigest(op v2alpha1.Operator, catalogDigest, filteredCatalogsDir string) (string, error) {
+	filterDigest, err := digestOfFilter(op, catalogDigest)
+	if err != nil {
+		return "", err
+	}
+
+	digestFile := filepath.Join(filteredCatalogsDir, filterDigest, "digest")
+	if _, err := os.Stat(digestFile); err == nil {
+		return filterDigest, nil
+	}
+
+	// Try legacy digest (without normalization) for backwards compatibility
+	// Error is intentionally ignored - if legacy digest fails, we use the normalized one
+	legacyDigest, _ := digestOfFilter(op, "")
+	if legacyDigest == filterDigest {
+		return filterDigest, nil
+	}
+
+	legacyDigestFile := filepath.Join(filteredCatalogsDir, legacyDigest, "digest")
+	if _, err := os.Stat(legacyDigestFile); err == nil {
+		return legacyDigest, nil
+	}
+
+	return filterDigest, nil
 }
 
 func (o FilterCollector) isAlreadyFiltered(ctx context.Context, srcImage, filteredImageDigest string) bool {
@@ -218,14 +269,14 @@ func (o FilterCollector) collectOperator( //nolint:cyclop // TODO: this needs fu
 
 	// OCPBUGS-45059
 	// TODO: remove me when the migration from oc-mirror v1 to v2 ends
-	if imgSpec.Transport == ociProtocol && o.isDeleteOfV1CatalogFromDisk() {
+	if imgSpec.Transport == consts.OciProtocol && o.isDeleteOfV1CatalogFromDisk() {
 		addOriginFromOperatorCatalogOnDisk(&ri)
 	}
 
 	maps.Copy(relatedImages, ri)
 
 	targetTag := op.TargetTag
-	if len(targetTag) == 0 && imgSpec.Transport == ociProtocol {
+	if len(targetTag) == 0 && imgSpec.Transport == consts.OciProtocol {
 		// for this case only, img.ParseRef(in its current state)
 		// will not be able to determine the digest.
 		// this leaves the oci imgSpec with no tag nor digest as it
@@ -236,22 +287,25 @@ func (o FilterCollector) collectOperator( //nolint:cyclop // TODO: this needs fu
 
 	catalogName := op.TargetCatalog
 	if len(catalogName) == 0 {
-		catalogName = path.Base(imgSpec.Reference)
+		catalogName = path.Base(imgSpec.Name)
 	}
 
 	catalogImage := op.Catalog
-	if imgSpec.Transport == ociProtocol {
+	if imgSpec.Transport == consts.OciProtocol {
 		// ensure correct oci format and directory lookup
-		sourceOCIDir, err := filepath.Abs(imgSpec.Reference)
+		sourceOCIDir, err := filepath.Abs(imgSpec.Name)
 		if err != nil {
 			return v2alpha1.CatalogFilterResult{}, fmt.Errorf("failed to get OCI image path: %w", err)
 		}
-		catalogImage = ociProtocol + sourceOCIDir
+		catalogImage = consts.OciProtocol + sourceOCIDir
 	}
 
 	rebuiltTag := ""
 	if !isFullCatalog(op) {
-		tag, err := digestOfFilter(op)
+		imageIndexDir := filepath.Join(o.Opts.Global.WorkingDir, operatorCatalogsDir, imgSpec.ComponentName(), catalogDigest)
+		filteredCatalogsDir := filepath.Join(imageIndexDir, operatorCatalogFilteredDir)
+
+		tag, err := findFilterDigest(op, catalogDigest, filteredCatalogsDir)
 		if err != nil {
 			return v2alpha1.CatalogFilterResult{}, err
 		}
@@ -284,6 +338,11 @@ func (o FilterCollector) getCatalogDigest(ctx context.Context, op v2alpha1.Opera
 		return "", err
 	}
 
+	// If the catalog is specified by digest, return it directly.
+	if imgSpec.IsImageByDigestOnly() {
+		return imgSpec.Digest, nil
+	}
+
 	srcCtx, err := o.Opts.SrcImage.NewSystemContext()
 	if err != nil {
 		return "", err
@@ -297,7 +356,7 @@ func (o FilterCollector) filterOperator(ctx context.Context, op v2alpha1.Operato
 	imageIndexDir := filepath.Join(o.Opts.Global.WorkingDir, operatorCatalogsDir, imgSpec.ComponentName(), catalogDigest)
 	filteredCatalogsDir := filepath.Join(imageIndexDir, operatorCatalogFilteredDir)
 
-	filterDigest, err := digestOfFilter(op)
+	filterDigest, err := findFilterDigest(op, catalogDigest, filteredCatalogsDir)
 	if err != nil {
 		return v2alpha1.CatalogFilterResult{}, err
 	}
@@ -305,15 +364,12 @@ func (o FilterCollector) filterOperator(ctx context.Context, op v2alpha1.Operato
 	var isAlreadyFiltered bool
 	filteredImageDigest, err := os.ReadFile(filepath.Join(filteredCatalogsDir, filterDigest, "digest"))
 	if err != nil {
-		// If there was an error reading the digest file, we assume the catalog has not been filtered
 		isAlreadyFiltered = false
 	} else {
-		// digest read
 		srcFilteredCatalog, err := o.cachedCatalog(op, filterDigest)
 		if err != nil {
 			return v2alpha1.CatalogFilterResult{}, err
 		}
-
 		isAlreadyFiltered = o.isAlreadyFiltered(ctx, srcFilteredCatalog, string(filteredImageDigest))
 	}
 
@@ -387,14 +443,14 @@ func (o FilterCollector) ensureCatalogInOCIFormat(ctx context.Context, imgSpec i
 	o.Log.Debug("Ensuring catalog is in OCI format")
 	catalogImageDir := filepath.Join(imageIndexDir, operatorCatalogImageDir)
 
-	if imgSpec.Transport != ociProtocol {
+	if imgSpec.Transport != consts.OciProtocol {
 		opts := o.Opts
 		opts.Stdout = io.Discard
 		opts.RemoveSignatures = true
 		opts.Global.SecurePolicy = false
 
-		src := dockerProtocol + catalog
-		dest := ociProtocolTrimmed + catalogImageDir
+		src := consts.DockerProtocol + catalog
+		dest := consts.OciProtocolTrimmed + catalogImageDir
 
 		// Prepare folders
 		if err := createFolders([]string{catalogImageDir}); err != nil {
@@ -435,7 +491,7 @@ func TagRebuiltCatalogByDigestOnly(collectorSchema *v2alpha1.CollectorSchema, lo
 			continue
 		}
 		dest := strings.Split(img.Destination, imgSpec.Algorithm)
-		if len(dest) == 0 {
+		if len(dest) <= 1 {
 			continue
 		}
 
